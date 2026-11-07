@@ -991,12 +991,19 @@ mod tests {
         assert_eq!(spec.sources.len(), 2);
         assert!(spec.sources.iter().all(|s| !s.contains(".cache")));
         assert!(spec.sources.iter().all(|s| !s.contains("Photos")));
+        // The catalogue stores the folder's resolved path (macOS `/private/var`, Windows
+        // long names instead of `RUNNER~1`), so compare against that, not the temp path.
+        let mount = cat
+            .volumes()
+            .unwrap()
+            .into_iter()
+            .find(|x| x.id == v.id)
+            .and_then(|x| x.mount_path)
+            .unwrap();
+        let expected_keep = crate::catalog::join_abs(&mount, "Photos", "beach.bin");
         let keep_path = t.join("Photos/beach.bin");
         for (src, check) in spec.sources.iter().zip(&spec.checks) {
-            assert_eq!(
-                Path::new(check.strip_prefix(CHECK_SAME_AS).unwrap()),
-                keep_path.as_path()
-            );
+            assert_eq!(check.strip_prefix(CHECK_SAME_AS).unwrap(), expected_keep);
             assert!(delete_check(Path::new(src), check, &AtomicBool::new(false)).is_ok());
         }
 
