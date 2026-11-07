@@ -56,12 +56,13 @@ export class AppStore {
 
   async refresh() {
     try {
-      const [volumes, detected, stats, scanning, enriching] = await Promise.all([
+      const [volumes, detected, stats, scanning, enriching, queued] = await Promise.all([
         api.listVolumes(),
         api.listDetected(),
         api.catalogStats(),
         api.scanning(),
         api.enriching(),
+        api.enrichQueued(),
       ]);
       this.volumes = volumes;
       this.detected = detected;
@@ -74,12 +75,10 @@ export class AppStore {
         }
       }
       for (const id of enriching) {
-        if (!this.enrich[id]) {
-          this.enrich[id] = {
-            phase: "running", volume_id: id, done: 0, total: 0, hashed: 0, metas: 0, thumbs: 0,
-            texts: 0, archives: 0, elapsed_ms: 0, current: "",
-          };
-        }
+        if (this.enrich[id]?.phase !== "running") this.enrich[id] = blankEnrich(id, "running");
+      }
+      for (const id of queued) {
+        if (!this.enrich[id]) this.enrich[id] = blankEnrich(id, "queued");
       }
       const cov = await Promise.all(volumes.map((v) => api.enrichCoverage(v.id).catch(() => null)));
       const next: Record<number, EnrichCoverage> = {};
@@ -106,7 +105,9 @@ export class AppStore {
   }
 
   private onEnrich(p: EnrichProgress) {
-    if (p.phase === "running") {
+    if (p.phase === "queued") {
+      this.enrich[p.volume_id] = p;
+    } else if (p.phase === "running") {
       this.enrich[p.volume_id] = p;
       // Results grow while enrichment runs; nudge the search view now and then.
       if (!this.bumpTimer) {
@@ -129,8 +130,10 @@ export class AppStore {
     return !!p && (p.phase === "walking" || p.phase === "committing");
   }
 
+  /** Enriching now, or queued behind another drive. */
   isEnriching(id: number): boolean {
-    return this.enrich[id]?.phase === "running";
+    const phase = this.enrich[id]?.phase;
+    return phase === "running" || phase === "queued";
   }
 
   async startScan(id: number) {
@@ -147,13 +150,22 @@ export class AppStore {
 
   async startEnrich(id: number) {
     try {
-      this.enrich[id] = {
-        phase: "running", volume_id: id, done: 0, total: 0, hashed: 0, metas: 0, thumbs: 0, texts: 0,
-        archives: 0, elapsed_ms: 0, current: "",
-      };
+      // Queued until the backend says it has started (straight away if nothing else runs).
+      this.enrich[id] = blankEnrich(id, Object.values(this.enrich).some((e) => e.phase === "running") ? "queued" : "running");
       await api.startEnrich(id);
     } catch (e) {
       delete this.enrich[id];
+      this.error = String(e);
+    }
+  }
+
+  /** Throw away a drive's enrichment (hashes kept) and run it again, e.g. to pick up new kinds of thumbnails. */
+  async redoEnrichment(id: number) {
+    try {
+      await api.resetEnrichment(id, true);
+      await this.refresh();
+      await this.startEnrich(id);
+    } catch (e) {
       this.error = String(e);
     }
   }
@@ -229,4 +241,11 @@ export class AppStore {
       this.error = String(e);
     }
   }
+}
+
+function blankEnrich(id: number, phase: "queued" | "running"): EnrichProgress {
+  return {
+    phase, volume_id: id, pass: 0, done: 0, total: 0, hashed: 0, metas: 0, thumbs: 0, texts: 0, archives: 0,
+    elapsed_ms: 0, current: "",
+  };
 }

@@ -28,6 +28,8 @@ pub struct ParsedQuery {
     pub content_phrases: Vec<String>,
     /// Flag bits that must be set (see `model::flags`).
     pub has_flags: Vec<u64>,
+    /// `is:leftover`: show only files operating systems left behind (hidden otherwise).
+    pub leftovers: bool,
     pub size_min: Option<u64>,
     pub size_max: Option<u64>,
     pub mtime_min: Option<i64>,
@@ -50,6 +52,7 @@ impl ParsedQuery {
                 && self.content_terms.is_empty()
                 && self.content_phrases.is_empty()
                 && self.has_flags.is_empty()
+                && !self.leftovers
                 && self.size_min.is_none()
                 && self.size_max.is_none()
                 && self.mtime_min.is_none()
@@ -192,6 +195,10 @@ fn apply_filter(q: &mut ParsedQuery, key: &str, value: &str, now: i64) -> bool {
             }
             "file" => {
                 q.item_type = Some(ItemType::File);
+                true
+            }
+            "leftover" | "leftovers" | "junk" => {
+                q.leftovers = true;
                 true
             }
             "archived" | "packed" | "inside" | "entry" => {

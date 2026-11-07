@@ -97,6 +97,35 @@ impl DupesDb {
         Ok(out)
     }
 
+    /// Every group with more than one member, in one pass.
+    pub fn all_groups(&self, min_size: u64) -> Result<Vec<RawGroup>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT e.hash, e.size, e.volume_id, e.file_id FROM entries e
+             JOIN (SELECT hash FROM entries WHERE size >= ?1
+                   GROUP BY hash HAVING COUNT(*) > 1) g ON g.hash = e.hash
+             ORDER BY e.hash, e.volume_id, e.file_id",
+        )?;
+        let mut rows = stmt.query([min_size as i64])?;
+        let mut out: Vec<RawGroup> = Vec::new();
+        while let Some(r) = rows.next()? {
+            let hash: Vec<u8> = r.get(0)?;
+            let member = (r.get(2)?, r.get(3)?);
+            match out.last_mut() {
+                Some(g) if g.hash == hash => {
+                    g.members.push(member);
+                    g.count += 1;
+                }
+                _ => out.push(RawGroup {
+                    size: r.get::<_, i64>(1)? as u64,
+                    hash,
+                    count: 1,
+                    members: vec![member],
+                }),
+            }
+        }
+        Ok(out)
+    }
+
     pub fn members(&self, hash: &[u8]) -> Result<Vec<(VolumeId, i64)>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT volume_id, file_id FROM entries WHERE hash = ?1 ORDER BY volume_id, file_id",

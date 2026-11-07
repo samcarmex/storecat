@@ -128,6 +128,28 @@
   });
 
   const kindTotal = $derived(kinds.reduce((a, k) => a + k.bytes, 0));
+  type Segment = { key: string; label: string; bytes: number; color: string; hatch?: boolean };
+  /**
+   * The capacity bar: content types by size, then space the scan did not catalogue (system
+   * folders it skips, file-system overhead), then free space last. A catalogued folder
+   * shares its disk with other things, so it shows its content only.
+   */
+  const segments = $derived.by<Segment[]>(() => {
+    const segs: Segment[] = kinds
+      .filter((k) => k.bytes > 0)
+      .map((k) => ({ key: k.kind, label: k.kind === "disk_image" ? "Disk images & VMs" : KIND_LABEL[k.kind], bytes: k.bytes, color: KIND_COLOR[k.kind] }));
+    const v = store.volumes.find((o) => o.id === volumeId);
+    if (v && v.source === "device" && v.capacity > 0) {
+      const used = Math.max(0, v.capacity - v.free);
+      const uncatalogued = used - kindTotal;
+      if (uncatalogued > v.capacity * 0.005) {
+        segs.push({ key: "system", label: "System and uncatalogued", bytes: uncatalogued, color: "#3a3f4b", hatch: true });
+      }
+      segs.push({ key: "free", label: "Free space", bytes: v.free, color: "transparent" });
+    }
+    return segs;
+  });
+  const barTotal = $derived(segments.reduce((a, g) => a + g.bytes, 0));
 
   // ----- suggestions -----
   let suggestions = $state<Suggestion[]>([]);
@@ -184,7 +206,7 @@
   function actionLabel(s: Suggestion): string {
     const a = s.action;
     if (!a) return "";
-    if (a.type === "job") return a.spec.kind === "move" ? "Review move" : "Review copy";
+    if (a.type === "job") return a.spec.kind === "move" ? "Review move" : a.spec.kind === "delete" ? "Review cleanup" : "Review copy";
     if (a.view === "storage" && a.dir_id !== null) return "Show folder";
     return { storage: "Show folders", drives: "Open drives", duplicates: "Review duplicates", operations: "Open operations" }[a.view] ?? "Open";
   }
@@ -263,15 +285,22 @@
         {/if}
       </div>
 
-      {#if kinds.length && kindTotal > 0}
-        <div class="kindbar" role="img" aria-label="Content types on this drive">
-          {#each kinds as k (k.kind)}
-            <div style="width: {(k.bytes / kindTotal) * 100}%; background: {KIND_COLOR[k.kind]}" title="{KIND_LABEL[k.kind]}: {bytes(k.bytes)}"></div>
+      {#if kinds.length && barTotal > 0}
+        <div class="kindbar" role="img" aria-label="What fills this drive">
+          {#each segments as g (g.key)}
+            <div
+              class:free={g.key === "free"}
+              class:hatch={g.hatch}
+              style="width: {(g.bytes / barTotal) * 100}%; background-color: {g.color}"
+              title="{g.label}: {bytes(g.bytes)}"
+            ></div>
           {/each}
         </div>
         <div class="legend">
-          {#each kinds.filter((k) => k.bytes / kindTotal >= 0.01).slice(0, 7) as k (k.kind)}
-            <span><i style="background: {KIND_COLOR[k.kind]}"></i>{KIND_LABEL[k.kind]} <b>{bytes(k.bytes)}</b></span>
+          {#each segments.filter((g) => g.key === "free" || g.key === "system" || g.bytes / barTotal >= 0.01).slice(0, 9) as g (g.key)}
+            <span>
+              <i class:free={g.key === "free"} class:hatch={g.hatch} style="background-color: {g.color}"></i>{g.label} <b>{bytes(g.bytes)}</b>
+            </span>
           {/each}
         </div>
       {/if}
@@ -456,6 +485,19 @@
   }
   .kindbar div {
     min-width: 2px;
+  }
+  .kindbar .free,
+  .legend i.free {
+    box-shadow: inset 0 0 0 1px var(--line-strong);
+    background: rgba(255, 255, 255, 0.04) !important;
+  }
+  .kindbar .hatch,
+  .legend i.hatch {
+    background-image: repeating-linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.08) 0 3px,
+      transparent 3px 6px
+    );
   }
   .legend {
     display: flex;

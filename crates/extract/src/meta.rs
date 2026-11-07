@@ -121,7 +121,7 @@ impl FileMeta {
 pub fn extract_meta(path: &Path, ext: &str) -> Option<FileMeta> {
     let p = path.to_path_buf();
     let e = ext.to_string();
-    guarded("meta", move || match e.as_str() {
+    guarded("meta", path, move || match e.as_str() {
         "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "heic" | "heif"
         | "avif" | "ico" | "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf" | "rw2"
         | "pef" | "srw" => image_meta(&p, &e),
@@ -353,13 +353,18 @@ fn codec_name(id: &str) -> String {
     s.to_lowercase()
 }
 
-const PDF_MAX_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const PDF_MAX_BYTES: u64 = crate::pdf::PDF_MAX_BYTES;
 
 fn pdf_meta(path: &Path) -> Option<FileMeta> {
     if std::fs::metadata(path).ok()?.len() > PDF_MAX_BYTES {
         return None;
     }
     let doc = lopdf::Document::load(path).ok()?;
+    Some(pdf_meta_of(&doc))
+}
+
+/// Page count and the Info dictionary of a parsed PDF.
+pub(crate) fn pdf_meta_of(doc: &lopdf::Document) -> FileMeta {
     let mut m = FileMeta::default();
     m.pages = Some(doc.get_pages().len() as u32);
     if let Ok(info_ref) = doc.trailer.get(b"Info") {
@@ -371,7 +376,7 @@ fn pdf_meta(path: &Path) -> Option<FileMeta> {
             let get = |key: &[u8]| -> Option<String> {
                 info.get(key)
                     .ok()
-                    .and_then(|o| pdf_string(&doc, o))
+                    .and_then(|o| pdf_string(doc, o))
                     .filter(|s| !s.trim().is_empty())
             };
             m.title = get(b"Title");
@@ -382,7 +387,7 @@ fn pdf_meta(path: &Path) -> Option<FileMeta> {
             m.doc_modified = get(b"ModDate").map(pdf_date);
         }
     }
-    Some(m)
+    m
 }
 
 fn pdf_string(doc: &lopdf::Document, o: &lopdf::Object) -> Option<String> {

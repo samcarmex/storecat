@@ -339,6 +339,7 @@
         <tr><td><code>tag:client-x</code></td><td>tagged items; tag words also match plain searches</td></tr>
         <tr><td><code>path:clients/acme</code></td><td>folder path</td></tr>
         <tr><td><code>is:dir</code> <code>is:archived</code> <code>has:thumb</code> <code>has:text</code></td><td>kinds of items</td></tr>
+        <tr><td><code>is:leftover</code></td><td>files macOS and Windows leave behind (<code>._name</code>, <code>.DS_Store</code>, <code>Thumbs.db</code>), hidden otherwise</td></tr>
       </tbody>
     </table>
   </section>

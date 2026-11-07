@@ -12,6 +12,7 @@ pub mod kind;
 pub mod model;
 pub mod ops;
 pub mod paths;
+pub mod places;
 pub mod scan;
 pub mod storage;
 pub mod suggest;
@@ -60,6 +61,7 @@ mod tests {
             phase: EnrichPhase::Failed {
                 message: "x".into(),
             },
+            pass: 1,
             done: 0,
             total: 0,
             hashed: 0,
@@ -73,6 +75,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(&p).unwrap();
         assert_eq!(v["phase"], "failed");
         assert_eq!(v["message"], "x");
+        assert_eq!(v["pass"], 1);
         let s = ScanProgress {
             volume_id: 1,
             phase: ScanPhase::Walking,

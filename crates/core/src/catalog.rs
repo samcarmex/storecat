@@ -15,7 +15,7 @@ use crossbeam_channel::bounded;
 
 use crate::db::dupes::DupesDb;
 use crate::db::master::{MasterDb, NewVolume};
-use crate::db::volume::{ThumbDb, VolumeDb, VolumeDbWriter, STAGE_ARCHIVE};
+use crate::db::volume::{FileRecord, ThumbDb, VolumeDb, VolumeDbWriter, STAGE_ARCHIVE};
 use crate::enrich::{flags_for, hex};
 use crate::error::{Error, Result};
 use crate::index::{query, DocInput, SearchIndex};
@@ -362,6 +362,12 @@ impl Catalog {
             .contains(&id)
     }
 
+    /// A scan of this volume started but never finished (the app was closed, crashed or
+    /// lost power): its half-built catalogue is still lying around.
+    pub fn scan_interrupted(&self, id: VolumeId) -> bool {
+        !self.is_scanning(id) && self.dirs.volume_db_tmp(id).exists()
+    }
+
     pub fn scanning_ids(&self) -> Vec<VolumeId> {
         self.scanning
             .lock()
@@ -654,9 +660,12 @@ impl Catalog {
     }
 
     /// Put a copy of the catalogue on the drive itself (`<root>/.storecat/`). Best effort:
-    /// read-only media and permission errors are simply skipped.
+    /// read-only media and permission errors are simply skipped. The drive the OS runs
+    /// from is skipped too: it never travels to another computer, and a folder at the
+    /// root of `C:\` is not something people expect an app to create.
     fn copy_catalog_to_drive(&self, volume: &Volume, root: &str) {
         if volume.source != VolumeSource::Device
+            || crate::paths::is_system_drive(root)
             || !self.setting_enabled(settings::COPY_TO_DRIVE, true)
         {
             return;
@@ -740,63 +749,121 @@ impl Catalog {
             }
             for f in &files {
                 after = f.id;
-                let stages = db.stages(f.id)?;
-                let tags = tag_map
-                    .get(&crate::enrich::item_path(f))
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                if stages == 0 {
-                    self.index.add_doc(&DocInput {
-                        volume_id: id,
-                        item_id: f.id,
-                        item_type: ItemType::File,
-                        name: &f.name,
-                        path: &f.path,
-                        ext: &f.ext,
-                        kind: f.kind,
-                        size: f.size,
-                        mtime: f.mtime,
-                        flags: flags_for(0, f.attrs),
-                        parent_key: 0,
-                        content: None,
-                        meta_text: None,
-                        tags,
-                    })?;
-                    continue;
-                }
-                let meta = db.meta_json(f.id)?;
-                let text = db.text(f.id)?;
-                let entries: Vec<(i64, storecat_extract::ArchiveEntry)> =
-                    if stages & STAGE_ARCHIVE != 0 {
-                        db.entries_for(f.id)?
-                            .into_iter()
-                            .map(|e| {
-                                (
-                                    e.id,
-                                    storecat_extract::ArchiveEntry {
-                                        path: e.path,
-                                        size: e.size,
-                                        mtime: e.mtime,
-                                        is_dir: e.is_dir,
-                                    },
-                                )
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                self.index_enriched_file(
-                    id,
-                    f,
-                    meta.as_deref(),
-                    text.as_deref(),
-                    stages,
-                    &entries,
-                    tags,
-                )?;
+                self.index_file_from_db(id, &db, f, &tag_map)?;
             }
         }
         Ok(())
+    }
+
+    /// (Re)index one file from its volume database, enrichment included.
+    fn index_file_from_db(
+        &self,
+        id: VolumeId,
+        db: &VolumeDb,
+        f: &FileRecord,
+        tag_map: &HashMap<String, Vec<String>>,
+    ) -> Result<()> {
+        let stages = db.stages(f.id)?;
+        let tags = tag_map
+            .get(&crate::enrich::item_path(f))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        if stages == 0 {
+            self.index.add_doc(&DocInput {
+                volume_id: id,
+                item_id: f.id,
+                item_type: ItemType::File,
+                name: &f.name,
+                path: &f.path,
+                ext: &f.ext,
+                kind: f.kind,
+                size: f.size,
+                mtime: f.mtime,
+                flags: flags_for(0, f.attrs),
+                parent_key: 0,
+                content: None,
+                meta_text: None,
+                tags,
+            })?;
+            return Ok(());
+        }
+        let meta = db.meta_json(f.id)?;
+        let text = db.text(f.id)?;
+        let entries: Vec<(i64, storecat_extract::ArchiveEntry)> = if stages & STAGE_ARCHIVE != 0 {
+            db.entries_for(f.id)?
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.id,
+                        storecat_extract::ArchiveEntry {
+                            path: e.path,
+                            size: e.size,
+                            mtime: e.mtime,
+                            is_dir: e.is_dir,
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.index_enriched_file(
+            id,
+            f,
+            meta.as_deref(),
+            text.as_deref(),
+            stages,
+            &entries,
+            tags,
+        )?;
+        Ok(())
+    }
+
+    /// Enrichment saves rows every second but commits the search index less often. If the
+    /// app stopped in between (power cut, crash), re-index the files saved since the index
+    /// last caught up. Cheap when there is nothing to do.
+    pub fn repair_index(&self, id: VolumeId) -> Result<usize> {
+        if !self.dirs.volume_db(id).exists() {
+            return Ok(0);
+        }
+        let db = self.volume_db(id)?;
+        let Some(since) = db
+            .info(crate::enrich::INDEX_SYNCED_AT)?
+            .and_then(|v| v.parse::<i64>().ok())
+        else {
+            return Ok(0);
+        };
+        let ids = db.enriched_since(since)?;
+        if !ids.is_empty() {
+            let tag_map = self.master().tag_map(id)?;
+            for fid in &ids {
+                if let Some(f) = db.file(*fid)? {
+                    self.index_file_from_db(id, &db, &f, &tag_map)?;
+                }
+            }
+            self.index.commit()?;
+            log::info!(
+                "re-indexed {} files of volume {id} after an interrupted run",
+                ids.len()
+            );
+        }
+        crate::enrich::mark_index_synced(&VolumeDb::open_rw(&self.dirs.volume_db(id))?)?;
+        Ok(ids.len())
+    }
+
+    /// `repair_index` for every catalogued volume; run once at startup.
+    pub fn repair_indexes(&self) {
+        let Ok(volumes) = self.volumes() else {
+            return;
+        };
+        for v in volumes {
+            if self.is_enriching(v.id) || self.is_scanning(v.id) {
+                continue;
+            }
+            if let Err(e) = self.repair_index(v.id) {
+                log::warn!("index repair of volume {} failed: {e}", v.id);
+            }
+        }
     }
 
     // ----- search ---------------------------------------------------------------------
@@ -1202,17 +1269,68 @@ impl Catalog {
 
     // ----- duplicates -------------------------------------------------------------------
 
+    /// Totals for your duplicates (copies in app-managed folders left out).
     pub fn duplicate_summary(&self) -> Result<DupSummary> {
-        let (groups, files, waste) = self
+        Ok(self
+            .duplicate_page(&DupQuery {
+                scope: DupScope::Mine,
+                sort: DupSort::Waste,
+                desc: true,
+                limit: 0,
+                offset: 0,
+            })?
+            .summary)
+    }
+
+    /// Duplicate groups in scope, sorted and paged, with totals over the whole scope.
+    pub fn duplicate_page(&self, q: &DupQuery) -> Result<DupPage> {
+        let raw = self
             .dupes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .summary(self.hash_min_bytes())?;
-        Ok(DupSummary {
-            groups,
-            files,
-            waste,
-        })
+            .all_groups(self.hash_min_bytes())?;
+        let volumes = self.volumes()?;
+        let mut dbs: HashMap<VolumeId, VolumeDb> = HashMap::new();
+        let mut groups = Vec::with_capacity(raw.len());
+        for g in raw {
+            if let Some(group) =
+                self.resolve_group(&g.hash, g.size, &g.members, &volumes, &mut dbs)?
+            {
+                if q.scope == DupScope::All || group.user_copies >= 2 {
+                    groups.push(group);
+                }
+            }
+        }
+        let summary = DupSummary {
+            groups: groups.len() as u64,
+            files: groups
+                .iter()
+                .map(|g| match q.scope {
+                    DupScope::Mine => g.user_copies,
+                    DupScope::All => g.count,
+                })
+                .sum(),
+            waste: groups.iter().map(|g| g.waste).sum(),
+        };
+        groups.sort_by(|a, b| {
+            let o = match q.sort {
+                DupSort::Waste => a.waste.cmp(&b.waste).then(a.size.cmp(&b.size)),
+                DupSort::Size => a.size.cmp(&b.size).then(a.waste.cmp(&b.waste)),
+                DupSort::Count => a.count.cmp(&b.count).then(a.waste.cmp(&b.waste)),
+                DupSort::Name => a
+                    .name
+                    .to_lowercase()
+                    .cmp(&b.name.to_lowercase())
+                    .then(b.waste.cmp(&a.waste)),
+            };
+            if q.desc {
+                o.reverse()
+            } else {
+                o
+            }
+        });
+        let groups = groups.into_iter().skip(q.offset).take(q.limit).collect();
+        Ok(DupPage { groups, summary })
     }
 
     pub fn duplicates(&self, limit: usize, offset: usize) -> Result<Vec<DupGroup>> {
@@ -1307,6 +1425,7 @@ impl Catalog {
                 volume_label: v.map(|v| v.label.clone()).unwrap_or_default(),
                 volume_online: v.map(|v| v.online).unwrap_or(false),
                 file_id: *fid,
+                app_managed: crate::places::is_app_managed(&f.path),
                 name: f.name,
                 path: f.path,
                 mtime: f.mtime,
@@ -1316,6 +1435,18 @@ impl Catalog {
         if out.len() < 2 {
             return Ok(None);
         }
+        let user_copies = out.iter().filter(|m| !m.app_managed).count() as u64;
+        let suggested_keep = out
+            .iter()
+            .filter(|m| !m.app_managed)
+            .min_by_key(|m| keep_rank(m))
+            .map(|m| (m.volume_id, m.file_id));
+        // Name the group after the copy that would be kept, not a "(1)" copy.
+        if let Some(k) = suggested_keep {
+            if let Some(m) = out.iter().find(|m| (m.volume_id, m.file_id) == k) {
+                name = m.name.clone();
+            }
+        }
         let verified = out.iter().all(|m| m.full_hash.is_some())
             && out.windows(2).all(|w| w[0].full_hash == w[1].full_hash);
         let count = out.len() as u64;
@@ -1323,7 +1454,9 @@ impl Catalog {
             hash: hex(hash),
             size,
             count,
-            waste: size * (count - 1),
+            waste: size * user_copies.saturating_sub(1),
+            user_copies,
+            suggested_keep,
             kind,
             name,
             verified,
@@ -1464,6 +1597,37 @@ impl Catalog {
         }
         Ok(())
     }
+}
+
+/// Which of your copies to keep: one on a connected drive, outside temporary, download
+/// and recycle folders, without a "(1)" or "- Copy" in its name, then the shortest path.
+fn keep_rank(m: &DupMember) -> (bool, u8, bool, usize, usize) {
+    let segs: Vec<String> = m
+        .path
+        .split(['/', '\\'])
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    let has = |names: &[&str]| segs.iter().any(|s| names.contains(&s.as_str()));
+    let place = if has(&["$recycle.bin", ".trash", ".trashes"]) {
+        3
+    } else if has(&["temp", "tmp"]) {
+        2
+    } else if has(&["downloads"]) {
+        1
+    } else {
+        0
+    };
+    let lower = m.name.to_ascii_lowercase();
+    let copy_name = lower.contains(" - copy")
+        || lower.starts_with("copy of ")
+        || (1..10).any(|n| lower.contains(&format!(" ({n})")));
+    (
+        !m.volume_online,
+        place,
+        copy_name,
+        segs.len(),
+        m.path.len() + m.name.len(),
+    )
 }
 
 /// Build an absolute path from a mount point, a `/`-separated relative dir and a name.
@@ -1670,5 +1834,142 @@ mod tests {
             1
         );
         assert!(cat.thumbnail(imported.id, 0).is_ok());
+    }
+
+    /// Hard-drive mode reads one file at a time in disk order, yet finds the same things;
+    /// package folders keep names and hashes but get no text or thumbnails.
+    #[test]
+    fn os_leftovers_are_hidden_from_search() {
+        let data = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::write(tree.path().join("song.mp3"), b"music").unwrap();
+        std::fs::write(tree.path().join("._song.mp3"), b"\x00\x05\x16\x07mac").unwrap();
+        std::fs::write(tree.path().join(".DS_Store"), b"finder").unwrap();
+        let cat = Catalog::open(DataDirs::at(data.path())).unwrap();
+        let v = cat.add_folder(tree.path(), Some("Mac stick")).unwrap();
+        cat.scan(v.id, &two_thread_scan(), &|_| {}).unwrap();
+        let names = |q: &str| -> Vec<String> {
+            let mut n: Vec<String> = cat
+                .search(q, &SearchOptions::default())
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|h| h.name)
+                .collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names("song"), vec!["song.mp3"]);
+        assert_eq!(names("ext:mp3"), vec!["song.mp3"]);
+        assert_eq!(names("is:leftover"), vec![".DS_Store", "._song.mp3"]);
+        assert_eq!(names("song is:leftover"), vec!["._song.mp3"]);
+    }
+
+    #[test]
+    fn index_catches_up_after_an_interrupted_run() {
+        let data = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tree.path().join("plan.md"),
+            "the zebra crossing plan
+",
+        )
+        .unwrap();
+        let cat = Catalog::open(DataDirs::at(data.path())).unwrap();
+        let v = cat.add_folder(tree.path(), Some("Cut")).unwrap();
+        cat.scan(v.id, &two_thread_scan(), &|_| {}).unwrap();
+        cat.enrich(v.id, &EnrichOptions::default(), &|_| {})
+            .unwrap();
+        let hits = |q: &str| cat.search(q, &SearchOptions::default()).unwrap().total;
+        assert_eq!(hits("zebra"), 1);
+
+        // The power goes out after rows were saved but before the index committed them.
+        cat.index.delete_volume(v.id).unwrap();
+        cat.index.commit().unwrap();
+        VolumeDb::open_rw(&cat.dirs.volume_db(v.id))
+            .unwrap()
+            .set_info(crate::enrich::INDEX_SYNCED_AT, "0")
+            .unwrap();
+        assert_eq!(hits("zebra"), 0);
+
+        assert_eq!(cat.repair_index(v.id).unwrap(), 1);
+        assert_eq!(hits("zebra"), 1);
+    }
+
+    #[test]
+    fn spinning_mode_and_package_folders() {
+        use crate::enrich::DiskMode;
+        let data = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        let t = tree.path();
+        std::fs::create_dir_all(t.join("notes")).unwrap();
+        std::fs::create_dir_all(t.join("app/.venv/Lib/site-packages/lib")).unwrap();
+        std::fs::write(t.join("notes/plan.md"), "the zebra crossing plan\n").unwrap();
+        std::fs::write(
+            t.join("app/.venv/Lib/site-packages/lib/index.js"),
+            "const needle = 'giraffe';\n",
+        )
+        .unwrap();
+        std::fs::write(t.join("app/.env"), "API_KEY=hunter2\n").unwrap();
+        let img = image::RgbImage::from_fn(300, 200, |x, _| image::Rgb([(x % 255) as u8, 9, 9]));
+        img.save(t.join("notes/shot.png")).unwrap();
+        img.save(t.join("app/.venv/Lib/site-packages/lib/icon.png"))
+            .unwrap();
+        let blob: Vec<u8> = (0..1_500_000u32).map(|i| (i % 249) as u8).collect();
+        std::fs::write(t.join("a.bin"), &blob).unwrap();
+        std::fs::write(t.join("app/.venv/Lib/site-packages/lib/b.bin"), &blob).unwrap();
+
+        let cat = Catalog::open(DataDirs::at(data.path())).unwrap();
+        let v = cat.add_folder(t, Some("Spin")).unwrap();
+        cat.scan(v.id, &two_thread_scan(), &|_| {}).unwrap();
+        let passes = std::sync::Mutex::new(Vec::<u8>::new());
+        let opts = EnrichOptions {
+            threads: 3,
+            disk: DiskMode::Spinning,
+            ..Default::default()
+        };
+        let stats = cat
+            .enrich(v.id, &opts, &|p| {
+                let mut seen = passes.lock().unwrap();
+                if seen.last() != Some(&p.pass) {
+                    seen.push(p.pass);
+                }
+            })
+            .unwrap();
+        assert!(!stats.paused);
+        assert_eq!(stats.processed, 7, "every file finished once");
+        assert_eq!(stats.texts, 1, "only notes/plan.md");
+        assert_eq!(stats.thumbs, 1, "png without a preview is read in full");
+        assert_eq!(stats.hashed, 2, "package files are still hashed");
+        let seen = passes.into_inner().unwrap();
+        assert!(seen.starts_with(&[0, 1]) && seen.contains(&2), "{seen:?}");
+
+        let cov = cat.enrich_coverage(v.id).unwrap();
+        assert_eq!(cov.done, cov.files);
+        let r = cat.search("zebra", &SearchOptions::default()).unwrap();
+        assert_eq!(r.total, 1);
+        assert_eq!(
+            cat.search("giraffe", &SearchOptions::default())
+                .unwrap()
+                .total,
+            0
+        );
+        assert_eq!(
+            cat.search("hunter2", &SearchOptions::default())
+                .unwrap()
+                .total,
+            0
+        );
+        assert_eq!(
+            cat.search("index.js", &SearchOptions::default())
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(cat.duplicates(10, 0).unwrap().len(), 1);
+
+        // Nothing left: a second run settles immediately.
+        let again = cat.enrich(v.id, &opts, &|_| {}).unwrap();
+        assert_eq!(again.processed, 0);
     }
 }

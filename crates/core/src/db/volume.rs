@@ -195,6 +195,19 @@ pub struct FileRecord {
     pub kind: Kind,
 }
 
+/// The columns enrichment planning needs, without the paths.
+#[derive(Debug, Clone)]
+pub struct PlanRow {
+    pub id: i64,
+    pub dir_id: i64,
+    pub ext: String,
+    pub size: u64,
+    pub kind: Kind,
+    pub attrs: u32,
+    pub done: u8,
+    pub stages: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct DirRecord {
     pub id: i64,
@@ -294,7 +307,8 @@ impl VolumeDb {
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA temp_store = MEMORY;
-             PRAGMA cache_size = -32768;",
+             PRAGMA cache_size = -32768;
+             PRAGMA journal_size_limit = 67108864;",
         )?;
         conn.execute_batch(ENRICHMENT_TABLES)?;
         conn.execute_batch(
@@ -465,20 +479,22 @@ impl VolumeDb {
         Ok(stages.map(|s| s & STAGE_THUMB as i64 != 0).unwrap_or(false))
     }
 
+    /// `done` counts fully enriched files; the stage counts include files whose second pass
+    /// (text, video thumbnails) is still to come.
     pub fn coverage(&self) -> Result<crate::model::EnrichCoverage> {
         let files: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
         let (done, thumbs, texts, hashed): (i64, i64, i64, i64) = self.conn.query_row(
-            "SELECT COUNT(*),
+            "SELECT SUM(CASE WHEN done = 1 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN stages & ?1 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN stages & ?2 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN stages & ?3 THEN 1 ELSE 0 END)
-             FROM enrich WHERE done = 1",
+             FROM enrich WHERE done >= 1",
             params![STAGE_THUMB as i64, STAGE_TEXT as i64, STAGE_HASH as i64],
             |r| {
                 Ok((
-                    r.get(0)?,
+                    r.get::<_, Option<i64>>(0)?.unwrap_or(0),
                     r.get::<_, Option<i64>>(1)?.unwrap_or(0),
                     r.get::<_, Option<i64>>(2)?.unwrap_or(0),
                     r.get::<_, Option<i64>>(3)?.unwrap_or(0),
@@ -494,29 +510,29 @@ impl VolumeDb {
         })
     }
 
-    /// Files not yet enriched, most useful first (images, video, documents), small first.
-    pub fn pending_enrichment(&self, limit: usize) -> Result<Vec<FileRecord>> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {FILE_COLS} FROM files f JOIN dirs d ON d.id = f.dir_id
-             LEFT JOIN enrich e ON e.file_id = f.id
-             WHERE e.file_id IS NULL OR e.done = 0
-             ORDER BY CASE f.kind WHEN 2 THEN 0 WHEN 1 THEN 1 WHEN 4 THEN 2 WHEN 9 THEN 3
-                                  WHEN 3 THEN 4 WHEN 5 THEN 5 WHEN 6 THEN 6 ELSE 7 END,
-                      f.size ASC
-             LIMIT ?1"
-        ))?;
-        let rows = stmt.query_map([limit as i64], row_to_file)?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    pub fn pending_count(&self) -> Result<u64> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM files f LEFT JOIN enrich e ON e.file_id = f.id
-             WHERE e.file_id IS NULL OR e.done = 0",
-            [],
-            |r| r.get(0),
+    /// Every file whose enrichment is not finished, streamed to `each` in id order. One
+    /// pass over the table per enrichment pass, instead of one query per batch.
+    pub fn plan_rows(&self, mut each: impl FnMut(PlanRow) -> Result<()>) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, f.dir_id, f.ext, f.size, f.kind, f.attrs,
+                    COALESCE(e.done, 0), COALESCE(e.stages, 0)
+             FROM files f LEFT JOIN enrich e ON e.file_id = f.id
+             WHERE e.file_id IS NULL OR e.done != 1",
         )?;
-        Ok(n as u64)
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            each(PlanRow {
+                id: r.get(0)?,
+                dir_id: r.get(1)?,
+                ext: r.get(2)?,
+                size: r.get::<_, i64>(3)? as u64,
+                kind: Kind::from_u8(r.get::<_, i64>(4)? as u8),
+                attrs: r.get::<_, i64>(5)? as u32,
+                done: r.get::<_, i64>(6)? as u8,
+                stages: r.get::<_, i64>(7)? as u32,
+            })?;
+        }
+        Ok(())
     }
 
     /// Everything the index needs to (re)build documents for this volume, streamed in
@@ -571,7 +587,7 @@ impl VolumeDb {
     /// Ids of files that have any enrichment worth re-indexing (text, meta, thumb, entries).
     pub fn enriched_file_ids(&self) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(
-            "SELECT file_id FROM enrich WHERE done = 1 AND stages & ?1 != 0 ORDER BY file_id",
+            "SELECT file_id FROM enrich WHERE done >= 1 AND stages & ?1 != 0 ORDER BY file_id",
         )?;
         let mask = (STAGE_THUMB | STAGE_TEXT | STAGE_META | STAGE_ARCHIVE | STAGE_HASH) as i64;
         let rows = stmt.query_map([mask], |r| r.get::<_, i64>(0))?;
@@ -606,10 +622,18 @@ impl VolumeDb {
         Ok(())
     }
 
+    /// Throw away the open transaction (the drive went away mid-batch).
+    pub fn rollback(&self) -> Result<()> {
+        self.conn.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+
     /// Write one file's enrichment. Archive entries are replaced; returns their new ids.
+    /// `done` is [`ENRICH_DONE`] or [`ENRICH_DETAIL_PENDING`]; stage bits accumulate.
     pub fn write_enrichment(
         &self,
         row: &EnrichRow,
+        done: u8,
         now: i64,
     ) -> Result<Vec<(i64, storecat_extract::ArchiveEntry)>> {
         if let Some(q) = &row.quick_hash {
@@ -654,12 +678,36 @@ impl VolumeDb {
             }
         }
         self.conn.execute(
-            "INSERT INTO enrich (file_id, done, stages, error, at) VALUES (?1, 1, ?2, ?3, ?4)
-             ON CONFLICT(file_id) DO UPDATE SET done = 1, stages = excluded.stages,
-                 error = excluded.error, at = excluded.at",
-            params![row.file_id, row.stages as i64, row.error, now],
+            "INSERT INTO enrich (file_id, done, stages, error, at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(file_id) DO UPDATE SET done = excluded.done,
+                 stages = enrich.stages | excluded.stages,
+                 error = COALESCE(excluded.error, enrich.error), at = excluded.at",
+            params![row.file_id, done as i64, row.stages as i64, row.error, now],
         )?;
         Ok(new_entries)
+    }
+
+    /// Record files that need no reading at all (or only the second pass) in one go.
+    /// Call inside `begin`/`commit`.
+    /// Files whose enrichment was written at or after `at` (unix seconds).
+    pub fn enriched_since(&self, at: i64) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT file_id FROM enrich WHERE done >= 1 AND at >= ?1")?;
+        let ids = stmt
+            .query_map([at], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<i64>, _>>()?;
+        Ok(ids)
+    }
+
+    pub fn mark_enriched(&self, file_id: i64, done: u8, stages: u32, now: i64) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO enrich (file_id, done, stages, at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(file_id) DO UPDATE SET done = excluded.done,
+                 stages = enrich.stages | excluded.stages, at = excluded.at",
+        )?;
+        stmt.execute(params![file_id, done as i64, stages as i64, now])?;
+        Ok(())
     }
 
     pub fn set_full_hash(&self, file_id: i64, full: &[u8; 32], now: i64) -> Result<()> {
@@ -772,6 +820,11 @@ impl VolumeDb {
     }
 }
 
+/// `enrich.done`: finished.
+pub const ENRICH_DONE: u8 = 1;
+/// `enrich.done`: first pass finished, text or video thumbnails still to do.
+pub const ENRICH_DETAIL_PENDING: u8 = 2;
+
 // Stage bits recorded in `enrich.stages`.
 pub const STAGE_HASH: u32 = 1;
 pub const STAGE_META: u32 = 2;
@@ -832,6 +885,12 @@ impl ThumbDb {
 
     pub fn commit(&self) -> Result<()> {
         self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    /// Throw away the open transaction (the drive went away mid-batch).
+    pub fn rollback(&self) -> Result<()> {
+        self.conn.execute_batch("ROLLBACK")?;
         Ok(())
     }
 }

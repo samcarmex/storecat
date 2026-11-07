@@ -26,6 +26,14 @@ trash = "5.2.9"
 ureq = "3.5.1"
 zip = "7.3.0"
 
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+]}
+
 [dev-dependencies]
 image = { version = "0.25.9", default-features = false, features = ["png"] }
 tempfile = "3.27.0"

@@ -162,6 +162,9 @@ pub mod flags {
     pub const PLACEHOLDER: u64 = 4;
     pub const HAS_META: u64 = 8;
     pub const HASHED: u64 = 16;
+    /// A file an operating system left behind (`._name`, `.DS_Store`, `Thumbs.db`...).
+    /// Hidden from search unless the query asks for `is:leftover`.
+    pub const OS_LEFTOVER: u64 = 32;
 }
 
 /// A volume the platform layer can see right now.
@@ -496,6 +499,8 @@ pub struct ArchiveRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "phase")]
 pub enum EnrichPhase {
+    /// Waiting for another drive's enrichment to finish (one runs at a time).
+    Queued,
     Running,
     /// Stopped because the drive went away or the user asked; resumes next time.
     Paused,
@@ -510,6 +515,11 @@ pub struct EnrichProgress {
     pub volume_id: VolumeId,
     #[serde(flatten)]
     pub phase: EnrichPhase,
+    /// 0 while planning the read order, 1 in the quick pass (hashes, metadata, photo
+    /// thumbnails, archives), 2 in the detail pass (document text, video thumbnails).
+    /// `done`/`total` count files in the current pass.
+    #[serde(default)]
+    pub pass: u8,
     pub done: u64,
     pub total: u64,
     pub hashed: u64,
@@ -519,6 +529,26 @@ pub struct EnrichProgress {
     pub archives: u64,
     pub elapsed_ms: u64,
     pub current: String,
+}
+
+impl EnrichProgress {
+    /// A progress event with no counts yet, e.g. `Queued`.
+    pub fn bare(volume_id: VolumeId, phase: EnrichPhase) -> Self {
+        Self {
+            volume_id,
+            phase,
+            pass: 0,
+            done: 0,
+            total: 0,
+            hashed: 0,
+            metas: 0,
+            thumbs: 0,
+            texts: 0,
+            archives: 0,
+            elapsed_ms: 0,
+            current: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -556,6 +586,10 @@ pub struct DupMember {
     pub path: String,
     pub mtime: i64,
     pub full_hash: Option<String>,
+    /// In a folder an application manages (a package cache, build output, app data).
+    /// Storecat never offers to delete these.
+    #[serde(default)]
+    pub app_managed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -564,8 +598,16 @@ pub struct DupGroup {
     pub hash: String,
     pub size: u64,
     pub count: u64,
-    /// Bytes that could be reclaimed by keeping one copy.
+    /// Bytes that could be reclaimed by keeping one of your copies (copies in app-managed
+    /// folders don't count: they are never removed).
     pub waste: u64,
+    /// Copies outside app-managed folders.
+    #[serde(default)]
+    pub user_copies: u64,
+    /// The copy Storecat would keep: outside temporary and download folders, on a
+    /// connected drive, shortest path. `None` when there are no copies of yours.
+    #[serde(default)]
+    pub suggested_keep: Option<(VolumeId, i64)>,
     pub kind: Kind,
     pub name: String,
     /// All members have a full hash and they agree.
@@ -578,6 +620,59 @@ pub struct DupSummary {
     pub groups: u64,
     pub files: u64,
     pub waste: u64,
+}
+
+/// Which duplicate groups to list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DupScope {
+    /// Groups with at least two copies outside app-managed folders.
+    #[default]
+    Mine,
+    /// Every group, app caches and build output included.
+    All,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DupSort {
+    #[default]
+    Waste,
+    Size,
+    Count,
+    Name,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DupQuery {
+    #[serde(default)]
+    pub scope: DupScope,
+    #[serde(default)]
+    pub sort: DupSort,
+    #[serde(default = "yes")]
+    pub desc: bool,
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DupPage {
+    pub groups: Vec<DupGroup>,
+    /// Totals over every group in scope, not just this page.
+    pub summary: DupSummary,
+}
+
+/// One duplicate group to clean up, keeping one copy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DupPick {
+    pub hash: String,
+    pub keep_volume_id: VolumeId,
+    pub keep_file_id: i64,
 }
 
 // ----- tools ----------------------------------------------------------------------------
@@ -755,6 +850,11 @@ pub struct JobSpec {
     pub dest_root: String,
     pub conflict: ConflictPolicy,
     pub verify: bool,
+    /// Delete jobs only, one per source file (or empty): a condition the file must still
+    /// meet when the job reaches it, or it is left alone. See `ops::CHECK_SAME_AS` and
+    /// `ops::CHECK_APPLEDOUBLE`.
+    #[serde(default)]
+    pub checks: Vec<String>,
 }
 
 /// Dry-run result.

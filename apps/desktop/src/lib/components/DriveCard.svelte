@@ -15,6 +15,7 @@
   ];
 
   let confirmRemove = $state(false);
+  let confirmRedo = $state(false);
   let editing = $state(false);
   let menu = $state(false);
   let draftLabel = $state("");
@@ -32,7 +33,22 @@
   const usedPct = $derived(v.capacity > 0 ? Math.min(100, (used / v.capacity) * 100) : 0);
   const freeText = $derived(v.capacity > 0 ? bytes(v.free) : bytes(v.total_bytes));
   const pending = $derived(cov ? Math.max(0, cov.files - cov.done) : 0);
-  const covPct = $derived(cov && cov.files > 0 ? Math.round((cov.done / cov.files) * 100) : 0);
+  const covPct = $derived(cov && cov.files > 0 ? Math.floor((cov.done / cov.files) * 100) : 0);
+  /** Scanned, but enrichment has never run: the next step. */
+  const neverEnriched = $derived(!!v.last_scan_at && !!cov && cov.files > 0 && cov.done === 0 && cov.hashed === 0);
+  const enrichPct = $derived(enrich && enrich.total > 0 ? Math.min(100, (enrich.done / enrich.total) * 100) : 0);
+  /** The drive this one is waiting for while queued. */
+  const queuedBehind = $derived.by(() => {
+    if (enrich?.phase !== "queued") return null;
+    const running = Object.values(store.enrich).find((e) => e.phase === "running" && e.volume_id !== v.id);
+    return running ? (store.volumes.find((o) => o.id === running.volume_id)?.label ?? null) : null;
+  });
+  const STEP_LABEL = ["Planning the read order", "Enriching", "Reading text and video"];
+  const STEP_TITLE = [
+    "Sorting files by where they sit on the disk, so the drive reads them in one sweep",
+    "Hashes, details, photo thumbnails and archive contents",
+    "Document text and video thumbnails",
+  ];
   const profile = $derived([v.bus ? busLabel(v.bus) : "", v.model].filter(Boolean).join(" · "));
   /** Another catalogued volume that already contains this one (its files appear twice). */
   const insideOf = $derived.by(() => {
@@ -135,39 +151,61 @@
   {/if}
 
   {#if progress && (scanning || progress.phase === "done" || progress.phase === "failed")}
-    <div class="scan" class:failed={progress.phase === "failed"}>
+    <div class="activity" class:failed={progress.phase === "failed"}>
       {#if progress.phase === "walking"}
-        <span class="spin"></span>
-        <span>Scanning · {count(progress.files)} files · {bytes(progress.bytes)} · {duration(progress.elapsed_ms)}</span>
-        <span class="muted cur">{progress.current || "…"}</span>
+        <div class="line"><span class="spin"></span><span>Scanning · {count(progress.files)} files · {bytes(progress.bytes)} · {duration(progress.elapsed_ms)}</span></div>
+        <div class="muted cur" title={progress.current}>&lrm;{progress.current || "…"}&lrm;</div>
       {:else if progress.phase === "committing"}
-        <span class="spin"></span><span>Writing index…</span>
+        <div class="line"><span class="spin"></span><span>Writing index…</span></div>
       {:else if progress.phase === "done"}
-        <span>Scanned · {count(progress.files)} files in {duration(progress.elapsed_ms)}</span>
+        <div class="line">Scanned · {count(progress.files)} files in {duration(progress.elapsed_ms)}</div>
       {:else if progress.phase === "failed"}
-        <span>Scan failed: {progress.message}</span>
+        <div class="line">Scan failed: {progress.message}</div>
       {/if}
     </div>
   {:else if enrich && (enriching || enrich.phase !== "running")}
-    <div class="scan" class:failed={enrich.phase === "failed"}>
-      {#if enrich.phase === "running"}
-        <span class="spin"></span>
-        <span>Enriching {count(enrich.done)} / {count(enrich.total)} · {count(enrich.thumbs)} thumbs · {count(enrich.texts)} texts</span>
-        <span class="muted cur">{enrich.current || "…"}</span>
+    <div class="activity" class:failed={enrich.phase === "failed"}>
+      {#if enrich.phase === "queued"}
+        <div class="line">
+          <span class="clock" aria-hidden="true"></span>
+          <span>Queued · {queuedBehind ? `starts after ${queuedBehind}` : "starts when the drive before it finishes"}</span>
+        </div>
+      {:else if enrich.phase === "running"}
+        <div class="line" title={STEP_TITLE[enrich.pass] ?? ""}>
+          <span class="spin"></span>
+          <span class="step">{STEP_LABEL[enrich.pass] ?? "Enriching"}{#if enrich.pass > 0}<span class="muted">{` · step ${enrich.pass} of 2`}</span>{/if}</span>
+          {#if enrich.total > 0}<span class="pct">{Math.floor(enrichPct)}%</span>{/if}
+        </div>
+        <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.floor(enrichPct)}>
+          <div style="width: {enrichPct}%"></div>
+        </div>
+        <div class="line muted">
+          {count(enrich.done)} of {count(enrich.total)} files{#if enrich.pass > 0}&nbsp;· {count(enrich.thumbs)} thumbnails · {count(enrich.texts)} texts{/if}
+        </div>
+        {#if enrich.pass > 0}
+          <div class="muted cur" title={enrich.current}>&lrm;{enrich.current || "…"}&lrm;</div>
+        {/if}
       {:else if enrich.phase === "done"}
-        <span>Enriched · {count(enrich.done)} files in {duration(enrich.elapsed_ms)}</span>
+        <div class="line">Enriched · {count(enrich.done)} files in {duration(enrich.elapsed_ms)}</div>
       {:else if enrich.phase === "paused"}
-        <span>Enrichment paused · resumes when connected</span>
+        <div class="line">Enrichment paused · {v.online ? "picks up where it left off next time" : "resumes when the drive is connected"}</div>
       {:else if enrich.phase === "failed"}
-        <span>Enrichment failed: {enrich.message}</span>
+        <div class="line">Enrichment failed: {enrich.message}</div>
       {/if}
+    </div>
+  {:else if neverEnriched && v.online && !scanning}
+    <div class="next">
+      <span class="next-tag">Next step</span>
+      <span>Enrich to add thumbnails, search inside documents and find duplicates.</span>
     </div>
   {:else}
     <div class="meta muted">
       {#if v.last_scan_at}
         Scanned {ago(v.last_scan_at)}
-        {#if cov && cov.files > 0}
-          · {covPct}% enriched · {count(cov.thumbs)} thumbs · {count(cov.texts)} texts
+        {#if neverEnriched}
+          · not enriched yet
+        {:else if cov && cov.files > 0}
+          · {pending > 0 ? `${covPct}% enriched` : "enriched"} · {count(cov.thumbs)} thumbnails · {count(cov.texts)} texts
         {/if}
       {:else}
         Not scanned yet
@@ -184,10 +222,10 @@
       {v.last_scan_at ? "Rescan" : "Scan"}
     </button>
     {#if enriching}
-      <button class="btn small ghost" onclick={() => store.cancelEnrich(v.id)}>Pause</button>
+      <button class="btn small ghost" onclick={() => store.cancelEnrich(v.id)}>{enrich?.phase === "queued" ? "Cancel" : "Pause"}</button>
     {:else if v.online && v.last_scan_at && pending > 0 && !scanning}
-      <button class="btn small" onclick={() => store.startEnrich(v.id)} title="Hashes, metadata, thumbnails, text">
-        Enrich {count(pending)}
+      <button class="btn small" class:primary={neverEnriched} onclick={() => store.startEnrich(v.id)} title="Hashes, details, thumbnails and document text">
+        {neverEnriched ? `Enrich ${count(pending)} files` : `Resume enriching (${count(pending)} left)`}
       </button>
     {/if}
     <span class="grow"></span>
@@ -204,6 +242,21 @@
             {/if}
             <button role="menuitem" onclick={doExport} disabled={!v.last_scan_at}>Export catalogue…</button>
             <button role="menuitem" onclick={() => { menu = false; store.startEnrich(v.id); }} disabled={!v.online || !v.last_scan_at || enriching}>Enrich now</button>
+            <button
+              role="menuitem"
+              disabled={!v.online || !v.last_scan_at || enriching || scanning}
+              title="Reads every file again for thumbnails, details and text. Hashes are kept."
+              onclick={() => {
+                if (!confirmRedo) {
+                  confirmRedo = true;
+                  setTimeout(() => (confirmRedo = false), 4000);
+                  return;
+                }
+                confirmRedo = false;
+                menu = false;
+                store.redoEnrichment(v.id);
+              }}
+            >{confirmRedo ? "Click again to redo enrichment" : "Redo enrichment…"}</button>
             <button role="menuitem" class="danger-text" onclick={askRemove} disabled={scanning || enriching}>Remove from catalogue</button>
           </div>
         {/if}
@@ -321,28 +374,89 @@
     border-radius: 4px;
     transition: width 0.4s;
   }
-  .meta,
-  .scan {
+  .meta {
     font-size: 12px;
     min-height: 18px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .scan {
+  .activity {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--fg);
+    min-width: 0;
+  }
+  .activity.failed {
+    color: var(--danger);
+  }
+  .line {
     display: flex;
     align-items: center;
     gap: 8px;
-    color: var(--fg);
+    min-height: 18px;
+    min-width: 0;
   }
-  .scan.failed {
-    color: var(--danger);
-    white-space: normal;
-  }
-  .cur {
+  .step {
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
     min-width: 0;
+  }
+  .pct {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .progress {
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+  }
+  .progress div {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.3s;
+  }
+  /* Long paths keep their end (the file name) visible. */
+  .cur {
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    direction: rtl;
+    text-align: left;
+  }
+  .clock {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid var(--fg-muted);
+    border-top-color: transparent;
+    flex-shrink: 0;
+  }
+  .next {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px dashed var(--accent-line);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .next-tag {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
   }
   .small-note {
     font-size: 11px;

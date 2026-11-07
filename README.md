@@ -27,6 +27,7 @@ file they need.
 - Thumbnails, photo/audio/video/document metadata and document text, visible offline
 - Files inside zip, 7z, tar and ISO disc images, searchable without extracting
 - Silent rescan when a known drive is plugged back in; enrichment resumes where it stopped
+- Easy on spinning hard drives: files are read in the order they sit on the disk
 - Tags, saved searches, a photo per drive, and a Ctrl+Shift+Space quick-search palette
 
 **Understand**
@@ -60,7 +61,7 @@ winget install Storecat.Storecat
 
 - [Tauri v2](https://v2.tauri.app/) shell, Rust core, Svelte 5 + TypeScript UI
 - SQLite catalogue per drive, one [Tantivy](https://github.com/quickwit-oss/tantivy) index across all drives
-- BLAKE3 hashing, WebP thumbnails
+- BLAKE3 hashing, JPEG thumbnails
 
 ## Building from source
 
@@ -110,7 +111,7 @@ storecat sweep E:\ --dry-run
 storecat backup "E:\Archive\2026-11 client files" "C:\Users\me\Documents\Clients" --move
 ```
 
-Data lives in `%LOCALAPPDATA%\Storecat` (override with `STORECAT_DATA_DIR`).
+Data lives in `%LOCALAPPDATA%\io.storecat.app` on Windows (override with `STORECAT_DATA_DIR`).
 Releasing is described in [RELEASING.md](RELEASING.md).
 
 ## Repository layout

@@ -47,7 +47,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main(app, None),
             "search" => toggle_palette(app),
-            "quit" => app.exit(0),
+            "quit" => self::quit(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -60,6 +60,37 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     }
     builder.build(app)?;
     Ok(())
+}
+
+/// Quit for real: hide the windows at once, drop queued enrichment, ask running enrichment
+/// and copy jobs to stop (both keep what they have done and resume next time), wait a few
+/// seconds for that, then exit. The hidden palette window would otherwise keep the process
+/// alive after the main window closes.
+pub fn quit(app: &AppHandle) {
+    for w in app.webview_windows().values() {
+        let _ = w.hide();
+    }
+    remove_tray(app);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Some(state) = app.try_state::<crate::AppState>() {
+            let catalog = &state.catalog;
+            crate::commands::clear_enrich_queue();
+            for id in catalog.enriching_ids() {
+                catalog.cancel_enrich(id);
+            }
+            for id in catalog.running_job_ids() {
+                catalog.pause_job(id);
+            }
+            let busy =
+                || !catalog.enriching_ids().is_empty() || !catalog.running_job_ids().is_empty();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            while busy() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        app.exit(0);
+    });
 }
 
 pub fn remove_tray(app: &AppHandle) {

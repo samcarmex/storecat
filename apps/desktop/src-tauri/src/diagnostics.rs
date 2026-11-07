@@ -117,6 +117,13 @@ pub fn set_verbose(verbose: bool) {
 fn install_panic_hook(dir: PathBuf) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // A third-party parser choking on one malformed file is caught and the file is
+        // skipped (see `storecat_extract::guarded_file`). That's not a crash: note it in
+        // the log and leave the crash reports for real failures.
+        if let Some(file) = storecat_extract::guarded_file() {
+            log::warn!("parser panic while reading {file}: {info}");
+            return;
+        }
         let thread = std::thread::current();
         let report = format!(
             "Storecat {} crash report\nwhen: {}\nplatform: {} {}\nthread: {}\n\n{}\n\nbacktrace:\n{}\n",

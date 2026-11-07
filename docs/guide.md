@@ -14,11 +14,24 @@ files take about half a minute on an SSD. Nothing on the drive is changed.
   (`\\nas\media`), a mapped drive (`Z:\`) or any folder. Shares that are offline simply
   show as not connected; Storecat never waits on them.
 - **Discs.** CDs, DVDs and Blu-rays appear like any other drive while the disc is in.
-- **After the first scan** Storecat *enriches* the catalogue in the background: quick
-  hashes, photo and audio metadata, thumbnails, document text and the contents of zip,
-  7z, tar and ISO files. It stops when you unplug the drive and resumes next time.
+- **After the first scan** Storecat *enriches* the catalogue in the background, in two
+  passes. First quick hashes (for duplicates), photo, audio and video details, photo
+  thumbnails, album art and the previews Office and other apps save in their files, and
+  the contents of zip, 7z, tar and ISO files; then document text and video thumbnails.
+  One drive is enriched at a time; others wait as "Queued". It stops when you unplug
+  the drive or quit, and carries on from where it got to next time. A scan that was cut
+  off starts again by itself.
+- **Spinning hard drives** are read one file at a time, in the order the files sit on
+  the disk, which avoids slow back-and-forth seeking. Photos on them get their
+  thumbnail from the small preview the camera stored in the file, so it can look a
+  little soft.
+- **Package and system folders** (Python environments, caches, editor extensions,
+  SDKs, repository copies in `.claude/worktrees`, `Windows`, `Program Files` and the
+  like) are catalogued and hashed but not read for text or thumbnails. `.env` files are
+  never read for text.
 - **Plug it back in later** and the drive is rescanned silently. Its catalogue is also
   copied to `.storecat\catalog.db` on the drive itself, so another computer can import it.
+  The drive Windows runs from is the exception: nothing is written to it.
 
 Give each drive a **role** from the menu on its card: Working, Media, Archive, Backup or
 System. Roles are how Storecat decides where suggested moves should go.
@@ -40,9 +53,15 @@ Type in **Search**. Results come from every drive, connected or not, as you type
 | `drive:` | `drive:seagate` | Drive name |
 | `path:` | `path:clients` | Folder path contains |
 | `is:` | `is:dir`, `is:archived` | Folders, or files inside archives |
+| `is:leftover` | `is:leftover` | Files macOS and Windows leave behind (see below) |
 | `content:` | `content:"unpaid invoice"` | Text inside documents |
 | `has:` | `has:thumb`, `has:text` | Enrichment present |
 | `tag:` | `tag:client-x` | Your tags |
+
+Files operating systems leave on drives are hidden from search: macOS's `._name`
+companions and `.DS_Store`, Windows' `Thumbs.db` and `desktop.ini`. They stay in the
+catalogue; `is:leftover` lists them. When a drive has a pile of them, Storage suggests a
+job that sends them to the Recycle Bin (`desktop.ini` excepted: Windows uses it).
 
 Press **Enter** to open a file, or reveal it in Explorer, when its drive is connected.
 When it isn't, the detail pane tells you which drive to fetch and where you said it lives.
@@ -69,6 +88,7 @@ The **Suggestions** list in Storage looks at your catalogue and proposes:
 | Desktop + Downloads sweep | They hold over 1 GB and the last sweep was over a quarter ago |
 | Cold folders | Folders over 1 GB on an SSD untouched for a year, to an Archive drive |
 | Duplicates | Over 1 GB wasted by identical copies |
+| Leftover files | 10 or more `._`, `.DS_Store` or `Thumbs.db` files on a drive |
 | Catalogued twice | A folder sits inside another catalogued folder or drive |
 | Stale catalogue | A drive not seen for six months |
 | Roles | No drive has the Archive or Backup role yet |
@@ -91,8 +111,16 @@ then read back and compared. A move deletes the original only after that check. 
 is journaled file by file, so pausing, closing Storecat, a crash or unplugging a drive
 loses at most the file in flight; **Resume** picks up from there.
 
-**Duplicates** lets you verify a group (full hash of every copy), choose the copy to keep,
-and send the rest to the recycle bin.
+**Duplicates** lists files that exist more than once, largest reclaimable space first;
+click a column heading to sort by name, copies, size or reclaimable space. Open a group,
+pick the copy to keep (Storecat suggests one outside Temp and Downloads, without "(1)" or
+"- Copy" in its name), and **Recycle other copies**. Tick several groups to clean
+them up in one job. Each copy is compared byte for byte with the one you keep just before
+it goes to the Recycle Bin, and left alone if it differs.
+
+Copies inside folders an app manages (package caches, build output, `AppData`, folders
+starting with a dot) are never removed: deleting them can break the app. **Your files**
+leaves groups made of such copies out; **Include app folders** shows them.
 
 ## 6. Privacy and your data
 
@@ -100,7 +128,7 @@ Everything stays on your computer. Storecat makes exactly two kinds of network r
 both optional: the FFmpeg download for video thumbnails (when you click it) and the daily
 update check against GitHub Releases (switch it off in Settings).
 
-Your catalogues live in `%LOCALAPPDATA%\Storecat` on Windows,
+Your catalogues live in `%LOCALAPPDATA%\io.storecat.app` on Windows,
 `~/Library/Application Support/Storecat` on macOS and `~/.local/share/Storecat` on Linux.
 Set `STORECAT_DATA_DIR` to keep them somewhere else, for example on a USB stick.
 
@@ -120,7 +148,7 @@ storecat tree 3 Videos              folder sizes on drive #3
 storecat suggest                    the suggestions list
 storecat sweep E:\ --dry-run        plan the Desktop + Downloads sweep
 storecat backup E:\Backup C:\Work   copy and verify
-storecat dupes --verify             duplicate groups
+storecat dupes --verify             duplicate groups (--all: app folders too)
 ```
 
 ## 8. Troubleshooting

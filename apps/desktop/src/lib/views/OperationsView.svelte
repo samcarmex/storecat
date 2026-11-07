@@ -53,7 +53,43 @@
     void loadPrefill(p);
   });
 
+  // A cleanup handed over from a suggestion: files to send to the Recycle Bin.
+  let cleanup = $state<JobSpec | null>(null);
+  let cleanupPlan = $state<JobPlan | null>(null);
+
+  async function loadCleanup(p: JobSpec) {
+    cleanup = p;
+    cleanupPlan = null;
+    formError = null;
+    planning = true;
+    try {
+      cleanupPlan = await ops.planJob(p);
+    } catch (e) {
+      formError = String(e);
+    } finally {
+      planning = false;
+    }
+  }
+
+  async function startCleanup() {
+    if (!cleanup) return;
+    starting = true;
+    formError = null;
+    try {
+      await ops.createJob(cleanup, true);
+      cleanup = null;
+      cleanupPlan = null;
+      await loadJobs();
+    } catch (e) {
+      formError = String(e);
+    } finally {
+      starting = false;
+    }
+  }
+
   async function loadPrefill(p: JobSpec) {
+    if (p.kind === "delete") return loadCleanup(p);
+    cleanup = null;
     kind = p.kind === "move" ? "move" : "copy";
     conflict = p.conflict;
     sources = [...p.sources];
@@ -194,6 +230,34 @@
 
 <div class="layout">
   <section class="card form" aria-label="New job">
+    {#if cleanup}
+    <h2>Clean up</h2>
+    <p class="cleanup-name">{cleanup.name}</p>
+    {#if cleanupPlan}
+      <div class="plan">
+        <div><strong>{count(cleanupPlan.files)}</strong> files · <strong>{bytes(cleanupPlan.bytes)}</strong> to the Recycle Bin</div>
+        <div class="muted">
+          {#if cleanupPlan.missing_sources.length}{count(cleanupPlan.missing_sources.length)} already gone · {/if}
+          Files that no longer match what they were picked for are left in place.
+        </div>
+        <div class="sample mono">
+          {#each cleanup.sources.slice(0, 6) as s (s)}
+            <div>{s}</div>
+          {/each}
+          {#if cleanup.sources.length > 6}<div class="muted">and {count(cleanup.sources.length - 6)} more</div>{/if}
+        </div>
+      </div>
+    {:else if planning}
+      <div class="muted">Checking…</div>
+    {/if}
+    {#if formError}<div class="error">{formError}</div>{/if}
+    <div class="actions">
+      <button class="btn" onclick={() => { cleanup = null; cleanupPlan = null; formError = null; }}>Cancel</button>
+      <button class="btn primary" onclick={startCleanup} disabled={!cleanupPlan || cleanupPlan.files === 0 || starting}>
+        {starting ? "Starting…" : `Recycle ${cleanupPlan ? count(cleanupPlan.files) : ""} files`}
+      </button>
+    </div>
+    {:else}
     <h2>New job</h2>
 
     <div class="row">
@@ -271,6 +335,7 @@
         {starting ? "Starting…" : kind === "move" ? "Move and verify" : "Copy and verify"}
       </button>
     </div>
+    {/if}
   </section>
 
   <section class="jobs" aria-label="Jobs">
@@ -334,6 +399,10 @@
 </div>
 
 <style>
+  .cleanup-name {
+    margin: 0;
+    font-weight: 600;
+  }
   .head { display: flex; align-items: flex-end; gap: 24px; flex-wrap: wrap; }
   h1 { font-size: 34px; font-weight: 700; line-height: 1.1; }
   h1 em { font-style: normal; color: var(--accent); }

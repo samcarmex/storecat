@@ -31,3 +31,4 @@ tauri-plugin-autostart = "2.5.1"
 anyhow.workspace = true
 tauri-plugin-updater = "2.14.1"
 tauri-plugin-process = "2.4.0"
+tauri-plugin-single-instance = "2"

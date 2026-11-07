@@ -13,17 +13,39 @@ pub const DEFAULT_MAX_TEXT: usize = 1024 * 1024;
 const PLAIN_EXTS: &[&str] = &[
     "txt", "md", "markdown", "csv", "tsv", "json", "xml", "yaml", "yml", "toml", "ini", "cfg",
     "log", "tex", "rtf", "srt", "vtt", "nfo", "rs", "py", "js", "ts", "tsx", "jsx", "mjs", "cjs",
-    "svelte", "vue", "css", "scss", "less", "c", "h", "cpp", "hpp", "cc", "cs", "java", "kt",
-    "swift", "go", "rb", "php", "sh", "ps1", "bat", "cmd", "sql", "lua", "r", "dart", "scala",
-    "zig", "ex", "exs", "erl", "hs", "jl", "pl", "vb", "fs", "gd", "glsl", "hlsl", "env",
+    "mts", "cts", "svelte", "vue", "css", "scss", "less", "c", "h", "cpp", "hpp", "cc", "cs",
+    "java", "kt", "swift", "go", "rb", "php", "sh", "ps1", "bat", "cmd", "sql", "lua", "r", "dart",
+    "scala", "zig", "ex", "exs", "erl", "hs", "jl", "pl", "vb", "fs", "gd", "glsl", "hlsl",
 ];
+
+/// Whether `ext` has a text extractor. `.env` files are deliberately absent: they hold
+/// passwords and keys, and catalogues get copied onto drives.
+pub fn has_extractor(ext: &str) -> bool {
+    matches!(
+        ext,
+        "pdf"
+            | "docx"
+            | "docm"
+            | "xlsx"
+            | "xlsm"
+            | "pptx"
+            | "pptm"
+            | "odt"
+            | "ods"
+            | "odp"
+            | "eml"
+            | "html"
+            | "htm"
+            | "xhtml"
+    ) || PLAIN_EXTS.contains(&ext)
+}
 
 /// Extract text for a file by extension. `max_bytes` bounds the result (and, for plain
 /// files, how much is read).
 pub fn extract_text(path: &Path, ext: &str, max_bytes: usize) -> Option<String> {
     let p = path.to_path_buf();
     let e = ext.to_string();
-    guarded("text", move || {
+    guarded("text", path, move || {
         let t = match e.as_str() {
             "pdf" => pdf_text(&p, max_bytes),
             "docx" | "docm" => ooxml_text(&p, &["word/document.xml"], "w:t", "</w:p>", max_bytes),
@@ -44,7 +66,7 @@ pub fn extract_text(path: &Path, ext: &str, max_bytes: usize) -> Option<String> 
     })
 }
 
-fn normalise(s: &str, max_bytes: usize) -> String {
+pub(crate) fn normalise(s: &str, max_bytes: usize) -> String {
     let mut out = String::with_capacity(s.len().min(max_bytes));
     let mut last_blank = false;
     for line in s.lines() {
@@ -156,15 +178,12 @@ pub fn strip_tags(html: &str) -> String {
     html_unescape(&out)
 }
 
-const PDF_TEXT_MAX_BYTES: u64 = 64 * 1024 * 1024;
-
 fn pdf_text(path: &Path, max_bytes: usize) -> Option<String> {
-    if std::fs::metadata(path).ok()?.len() > PDF_TEXT_MAX_BYTES {
+    if std::fs::metadata(path).ok()?.len() > crate::pdf::PDF_MAX_BYTES {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
-    let text = pdf_extract::extract_text_from_mem(&bytes).ok()?;
-    Some(truncate_utf8(text, max_bytes))
+    crate::pdf::pdf_meta_and_text(path, &bytes, false, true, max_bytes).1
 }
 
 /// Pull the text runs of an Office Open XML part. `tag` is the run element (e.g. `w:t`),
@@ -324,6 +343,85 @@ fn eml_text(path: &Path, max_bytes: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A one-page PDF whose font has a ToUnicode CMap with a 3-byte `bfrange`
+    /// destination. pdf-extract's CMap parser panics on that ("bad length of
+    /// hexstring"), which is what took down 0.9.0 release builds mid-enrichment.
+    fn pdf_with_bad_cmap() -> Vec<u8> {
+        let cmap = "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+                    1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
+                    1 beginbfrange\n<41> <41> <004100>\nendbfrange\nendcmap\nend\nend\n";
+        let content = "BT /F1 12 Tf 10 10 Td (A) Tj ET";
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+             /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+                .to_string(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>".to_string(),
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ),
+            format!("<< /Length {} >>\nstream\n{cmap}\nendstream", cmap.len()),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for o in offsets {
+            pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn malformed_pdf_is_skipped_not_fatal() {
+        let pdf = pdf_with_bad_cmap();
+        // The fixture really does make the third-party parser panic...
+        let raw = std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(&pdf));
+        assert!(raw.is_err(), "fixture no longer triggers the parser panic");
+
+        // ...and Storecat turns that into "no text" for this one file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.pdf");
+        std::fs::write(&path, &pdf).unwrap();
+        assert_eq!(extract_text(&path, "pdf", DEFAULT_MAX_TEXT), None);
+        assert_eq!(
+            crate::guarded_file(),
+            None,
+            "guard must be cleared afterwards"
+        );
+    }
+
+    /// `guarded` only works if panics unwind. Keep `panic = "abort"` out of the
+    /// workspace's release profile.
+    #[test]
+    fn release_builds_unwind_panics() {
+        let manifest = include_str!("../../../Cargo.toml");
+        let release = manifest
+            .split("[profile.release]")
+            .nth(1)
+            .expect("workspace Cargo.toml has a release profile");
+        let release = release.split("\n[").next().unwrap_or(release);
+        assert!(
+            !release.replace(' ', "").contains("panic=\"abort\""),
+            "release profile must not abort on panic: parser panics would kill the app"
+        );
+    }
 
     #[test]
     fn strips_html() {

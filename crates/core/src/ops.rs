@@ -20,6 +20,12 @@ use crate::error::{Error, Result};
 use crate::model::*;
 
 const BUF: usize = 1024 * 1024;
+
+/// Delete check: the file must be byte-for-byte identical to the file at the path that
+/// follows (the copy being kept), which must still exist.
+pub const CHECK_SAME_AS: &str = "check:same-as:";
+/// Delete check: the file must be a macOS AppleDouble companion (`._name`).
+pub const CHECK_APPLEDOUBLE: &str = "check:appledouble";
 const TEMP_SUFFIX: &str = ".storecat-part";
 
 /// Expand a spec's sources into (source, dest, size, mtime) items.
@@ -30,7 +36,7 @@ fn expand(
 ) -> Result<Vec<(String, String, u64, i64)>> {
     let mut items = Vec::new();
     let dest_root = PathBuf::from(&spec.dest_root);
-    for src in &spec.sources {
+    for (i, src) in spec.sources.iter().enumerate() {
         let p = Path::new(src);
         let Ok(md) = fs::metadata(p) else {
             plan.missing_sources.push(src.clone());
@@ -45,8 +51,9 @@ fn expand(
             let base = dest_root.join(&name);
             walk_into(p, &base, spec.kind, plan, collect, &mut items)?;
         } else {
+            // Delete items carry their check where copies carry a destination.
             let dest = match spec.kind {
-                JobKind::Delete => String::new(),
+                JobKind::Delete => spec.checks.get(i).cloned().unwrap_or_default(),
                 _ => dest_root
                     .join(p.file_name().unwrap_or_default())
                     .to_string_lossy()
@@ -209,6 +216,64 @@ fn hash_file(path: &Path, cancel: &AtomicBool) -> std::io::Result<[u8; 32]> {
         h.update(&buf[..n]);
     }
     Ok(*h.finalize().as_bytes())
+}
+
+/// The keeper's hash, remembered between the items of one duplicate group.
+static KEEPER_HASH: std::sync::Mutex<Option<(PathBuf, u64, [u8; 32])>> =
+    std::sync::Mutex::new(None);
+
+/// Refuse to delete a file that no longer meets the condition it was planned under.
+fn delete_check(src: &Path, check: &str, cancel: &AtomicBool) -> Result<()> {
+    let refuse = |why: &str| Err(Error::Other(format!("left in place: {why}")));
+    if check.is_empty() {
+        return Ok(());
+    }
+    if check == CHECK_APPLEDOUBLE {
+        let mut head = [0u8; 4];
+        let ok = File::open(src)
+            .and_then(|mut f| f.read_exact(&mut head))
+            .is_ok();
+        return if ok && head == crate::places::APPLEDOUBLE_MAGIC {
+            Ok(())
+        } else {
+            refuse("not a macOS metadata file")
+        };
+    }
+    let Some(keep) = check.strip_prefix(CHECK_SAME_AS) else {
+        return refuse("unknown check");
+    };
+    let keep = Path::new(keep);
+    if keep == src {
+        return refuse("it is the copy being kept");
+    }
+    let (Ok(km), Ok(sm)) = (fs::metadata(keep), fs::metadata(src)) else {
+        return refuse("the copy being kept is missing");
+    };
+    if km.len() != sm.len() {
+        return refuse("it differs from the copy being kept");
+    }
+    let cancelled = |e: std::io::Error| Error::Other(e.to_string());
+    let keep_hash = {
+        let cached = KEEPER_HASH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .filter(|(p, len, _)| p == keep && *len == km.len())
+            .map(|(_, _, h)| h);
+        match cached {
+            Some(h) => h,
+            None => {
+                let h = hash_file(keep, cancel).map_err(cancelled)?;
+                *KEEPER_HASH.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((keep.to_path_buf(), km.len(), h));
+                h
+            }
+        }
+    };
+    if hash_file(src, cancel).map_err(cancelled)? != keep_hash {
+        return refuse("it differs from the copy being kept");
+    }
+    Ok(())
 }
 
 /// `photo.jpg` → `photo (2).jpg`, `photo (3).jpg`, …
@@ -644,6 +709,7 @@ impl Catalog {
                 master().set_item_status(item.id, ItemStatus::Done, None, None)?;
                 return Ok(ItemStatus::Done);
             }
+            delete_check(src, &item.dest, cancel)?;
             trash::delete(src).map_err(|e| Error::Other(format!("recycle bin: {e}")))?;
             master().set_item_status(item.id, ItemStatus::Done, None, None)?;
             return Ok(ItemStatus::Done);
@@ -745,54 +811,89 @@ impl Catalog {
             dest_root: dest.to_string_lossy().into_owned(),
             conflict: ConflictPolicy::Rename,
             verify: true,
+            checks: Vec::new(),
         }
     }
 
-    /// A delete job that keeps one member of a duplicate group and recycles the rest.
-    /// Refuses unless the group is verified and every copy to delete is on a connected drive.
-    pub fn duplicate_cleanup_spec(&self, hash_hex: &str, keep: (VolumeId, i64)) -> Result<JobSpec> {
-        let hash = crate::enrich::unhex(hash_hex).ok_or_else(|| Error::Other("bad hash".into()))?;
-        let group = self
-            .duplicate_group(&hash, None)?
-            .ok_or_else(|| Error::Other("duplicate group not found".into()))?;
-        if !group.verified {
+    /// A delete job that keeps one copy in each duplicate group and recycles the other
+    /// copies of yours. Copies in app-managed folders and on disconnected drives are left
+    /// alone. Each deletion re-checks, byte for byte, that the file still matches the copy
+    /// being kept, so groups found by quick hash need no separate verify step.
+    pub fn duplicate_cleanup_spec(&self, picks: &[DupPick]) -> Result<JobSpec> {
+        let volumes = self.volumes()?;
+        let mount_of = |vid: VolumeId| -> Option<&str> {
+            volumes
+                .iter()
+                .find(|v| v.id == vid && v.online)
+                .and_then(|v| v.mount_path.as_deref())
+        };
+        let mut sources = Vec::new();
+        let mut checks = Vec::new();
+        let mut groups = 0usize;
+        let mut first_name = String::new();
+        for pick in picks {
+            let hash =
+                crate::enrich::unhex(&pick.hash).ok_or_else(|| Error::Other("bad hash".into()))?;
+            let Some(group) = self.duplicate_group(&hash, Some(&volumes))? else {
+                continue;
+            };
+            let keep = (pick.keep_volume_id, pick.keep_file_id);
+            let Some(keeper) = group
+                .members
+                .iter()
+                .find(|m| (m.volume_id, m.file_id) == keep)
+            else {
+                return Err(Error::Other(format!(
+                    "the copy to keep is not in the group of {}",
+                    group.name
+                )));
+            };
+            let Some(keep_mount) = mount_of(keeper.volume_id) else {
+                return Err(Error::Other(format!(
+                    "connect {} first: the copy of {} to keep is on it",
+                    keeper.volume_label, group.name
+                )));
+            };
+            let keep_path = crate::catalog::join_abs(keep_mount, &keeper.path, &keeper.name);
+            let before = sources.len();
+            for m in &group.members {
+                if (m.volume_id, m.file_id) == keep || m.app_managed {
+                    continue;
+                }
+                let Some(mount) = mount_of(m.volume_id) else {
+                    continue;
+                };
+                sources.push(crate::catalog::join_abs(mount, &m.path, &m.name));
+                checks.push(format!("{CHECK_SAME_AS}{keep_path}"));
+            }
+            if sources.len() > before {
+                groups += 1;
+                if first_name.is_empty() {
+                    first_name = group.name.clone();
+                }
+            }
+        }
+        if sources.is_empty() {
             return Err(Error::Other(
-                "verify the group first so every copy is known to be identical".into(),
+                "nothing to remove: the other copies are in app folders or on disconnected drives"
+                    .into(),
             ));
         }
-        if !group
-            .members
-            .iter()
-            .any(|m| (m.volume_id, m.file_id) == keep)
-        {
-            return Err(Error::Other("the copy to keep is not in this group".into()));
-        }
-        let volumes = self.volumes()?;
-        let mut sources = Vec::new();
-        for m in group
-            .members
-            .iter()
-            .filter(|m| (m.volume_id, m.file_id) != keep)
-        {
-            let v = volumes
-                .iter()
-                .find(|v| v.id == m.volume_id)
-                .ok_or(Error::VolumeNotFound(m.volume_id))?;
-            let mount = v.mount_path.as_ref().ok_or(Error::VolumeOffline)?;
-            sources.push(crate::catalog::join_abs(mount, &m.path, &m.name));
-        }
+        let n = sources.len();
+        let copies = if n == 1 { "copy" } else { "copies" };
+        let name = if groups == 1 {
+            format!("Remove {n} extra {copies} of {first_name}")
+        } else {
+            format!("Remove {n} extra {copies} from {groups} duplicate groups")
+        };
         Ok(JobSpec {
             kind: JobKind::Delete,
-            name: format!(
-                "Remove {} extra cop{} of {}",
-                sources.len(),
-                if sources.len() == 1 { "y" } else { "ies" },
-                group.name
-            ),
+            name,
             sources,
             dest_root: String::new(),
             conflict: ConflictPolicy::Skip,
             verify: false,
+            checks,
         })
     }
 }
@@ -825,6 +926,109 @@ mod tests {
         (data, src, dst, cat)
     }
 
+    /// Duplicate cleanup keeps the best copy of yours, never touches app copies, and each
+    /// deletion re-checks the file against the copy being kept.
+    #[test]
+    fn duplicate_cleanup_keeps_one_and_checks_each_copy() {
+        let data = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        let t = tree.path();
+        let blob: Vec<u8> = (0..2_000_000u32).map(|i| (i % 251) as u8).collect();
+        for p in [
+            "Photos/beach.bin",
+            "Downloads/beach (1).bin",
+            "AppData/Local/Temp/wetransfer/beach.bin",
+            ".cache/thumbs/beach.bin",
+        ] {
+            fs::create_dir_all(t.join(p).parent().unwrap()).unwrap();
+            fs::write(t.join(p), &blob).unwrap();
+        }
+        let cat = Catalog::open(DataDirs::at(data.path())).unwrap();
+        let v = cat.add_folder(t, Some("Dupes")).unwrap();
+        cat.scan(v.id, &ScanOptions::default(), &|_| {}).unwrap();
+        cat.enrich(v.id, &crate::EnrichOptions::default(), &|_| {})
+            .unwrap();
+
+        let q = |scope| DupQuery {
+            scope,
+            sort: DupSort::Waste,
+            desc: true,
+            limit: 10,
+            offset: 0,
+        };
+        let mine = cat.duplicate_page(&q(DupScope::Mine)).unwrap();
+        assert_eq!(mine.groups.len(), 1);
+        let g = &mine.groups[0];
+        assert_eq!(g.count, 4);
+        assert_eq!(g.user_copies, 3);
+        assert_eq!(g.waste, 4_000_000, "the app copy doesn't count");
+        assert_eq!(mine.summary.files, 3);
+        let keep = g.suggested_keep.unwrap();
+        let keeper = g
+            .members
+            .iter()
+            .find(|m| (m.volume_id, m.file_id) == keep)
+            .unwrap();
+        assert_eq!(keeper.path, "Photos");
+        assert!(g
+            .members
+            .iter()
+            .any(|m| m.app_managed && m.path == ".cache/thumbs"));
+        assert_eq!(
+            cat.duplicate_page(&q(DupScope::All)).unwrap().summary.files,
+            4
+        );
+
+        let spec = cat
+            .duplicate_cleanup_spec(&[DupPick {
+                hash: g.hash.clone(),
+                keep_volume_id: keep.0,
+                keep_file_id: keep.1,
+            }])
+            .unwrap();
+        assert_eq!(spec.kind, JobKind::Delete);
+        assert_eq!(spec.name, "Remove 2 extra copies of beach.bin");
+        assert_eq!(spec.sources.len(), 2);
+        assert!(spec.sources.iter().all(|s| !s.contains(".cache")));
+        assert!(spec.sources.iter().all(|s| !s.contains("Photos")));
+        let keep_path = t.join("Photos/beach.bin");
+        for (src, check) in spec.sources.iter().zip(&spec.checks) {
+            assert_eq!(
+                Path::new(check.strip_prefix(CHECK_SAME_AS).unwrap()),
+                keep_path.as_path()
+            );
+            assert!(delete_check(Path::new(src), check, &AtomicBool::new(false)).is_ok());
+        }
+
+        // A copy that changed since it was catalogued is left in place.
+        let temp_copy = t.join("AppData/Local/Temp/wetransfer/beach.bin");
+        let mut changed = blob.clone();
+        changed[1234] ^= 0xff;
+        fs::write(&temp_copy, &changed).unwrap();
+        let check = format!("{CHECK_SAME_AS}{}", keep_path.display());
+        let e = delete_check(&temp_copy, &check, &AtomicBool::new(false)).unwrap_err();
+        assert!(e.to_string().contains("left in place"), "{e}");
+        // So is the keeper itself, and anything when the keeper has gone.
+        assert!(delete_check(&keep_path, &check, &AtomicBool::new(false)).is_err());
+        let gone = format!("{CHECK_SAME_AS}{}", t.join("nope.bin").display());
+        assert!(delete_check(&temp_copy, &gone, &AtomicBool::new(false)).is_err());
+    }
+
+    #[test]
+    fn appledouble_check_reads_the_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("._song.mp3");
+        let fake = dir.path().join("._notes.txt");
+        let mut bytes = crate::places::APPLEDOUBLE_MAGIC.to_vec();
+        bytes.extend_from_slice(b"mac metadata");
+        fs::write(&real, bytes).unwrap();
+        fs::write(&fake, b"just text").unwrap();
+        let no = AtomicBool::new(false);
+        assert!(delete_check(&real, CHECK_APPLEDOUBLE, &no).is_ok());
+        assert!(delete_check(&fake, CHECK_APPLEDOUBLE, &no).is_err());
+        assert!(delete_check(&fake, "", &no).is_ok(), "no check, no refusal");
+    }
+
     #[test]
     fn copy_then_move_with_verify_and_resume() {
         let (_data, src, dst, cat) = setup();
@@ -839,6 +1043,7 @@ mod tests {
             dest_root: dest_root.to_string_lossy().into_owned(),
             conflict: ConflictPolicy::Rename,
             verify: true,
+            checks: Vec::new(),
         };
         let plan = cat.plan_job(&spec).unwrap();
         assert_eq!(plan.files, 3);
@@ -875,6 +1080,7 @@ mod tests {
             dest_root: dest2.to_string_lossy().into_owned(),
             conflict: ConflictPolicy::Rename,
             verify: true,
+            checks: Vec::new(),
         };
         let job3 = cat.create_job(&spec_move).unwrap();
         let cat2 = Arc::clone(&cat);
@@ -918,6 +1124,7 @@ mod tests {
             dest_root: dst.path().join("out").to_string_lossy().into_owned(),
             conflict: ConflictPolicy::Rename,
             verify: true,
+            checks: Vec::new(),
         };
         assert_eq!(cat.plan_job(&spec).unwrap().conflicts, 1);
         let job = cat.create_job(&spec).unwrap();

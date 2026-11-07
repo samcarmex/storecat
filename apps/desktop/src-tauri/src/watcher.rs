@@ -1,7 +1,8 @@
 //! Watches for drives coming and going. Polls the platform layer every two seconds
 //! (cheap: one volume enumeration) and tells the UI when anything changed. A catalogued
-//! drive that reappears while the app runs is rescanned silently, as the user chose, and
-//! any volume with unfinished enrichment is resumed when the app starts.
+//! drive that reappears while the app runs is rescanned silently, as the user chose. When
+//! the app starts, scans that were cut off are restarted and unfinished enrichment resumes
+//! (for drives that are connected; the others catch up when they are plugged in).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -55,13 +56,14 @@ fn run(app: AppHandle, catalog: Arc<Catalog>) {
                 }
                 match &seen {
                     Some(prev) => {
-                        if catalog.setting_enabled(settings::AUTO_RESCAN, true) {
-                            for identity in now_ids.difference(prev) {
-                                maybe_rescan(&app, &catalog, identity);
-                            }
+                        for identity in now_ids.difference(prev) {
+                            maybe_rescan(&app, &catalog, identity);
                         }
                     }
-                    None => resume_enrichment(&app, &catalog),
+                    None => {
+                        catalog.repair_indexes();
+                        resume_interrupted(&app, &catalog);
+                    }
                 }
                 seen = Some(now_ids);
             }
@@ -82,7 +84,10 @@ fn maybe_rescan(app: &AppHandle, catalog: &Arc<Catalog>, identity: &str) {
         .last_scan_at
         .map(|t| now_unix() - t > RESCAN_MIN_AGE_SECS)
         .unwrap_or(true);
-    if stale && !catalog.is_scanning(v.id) {
+    // A scan cut off by unplugging always restarts; routine rescans follow the setting.
+    let cut_off = catalog.scan_interrupted(v.id);
+    let rescan = cut_off || (stale && catalog.setting_enabled(settings::AUTO_RESCAN, true));
+    if rescan && !catalog.is_scanning(v.id) {
         log::info!("volume \"{}\" reconnected, rescanning", v.label);
         crate::commands::spawn_scan(app.clone(), Arc::clone(catalog), v.id);
     } else if catalog.setting_enabled(settings::AUTO_ENRICH, true) {
@@ -94,18 +99,23 @@ fn maybe_rescan(app: &AppHandle, catalog: &Arc<Catalog>, identity: &str) {
     }
 }
 
-/// On startup: pick up enrichment that was interrupted last time, for connected drives.
-fn resume_enrichment(app: &AppHandle, catalog: &Arc<Catalog>) {
-    if !catalog.setting_enabled(settings::AUTO_ENRICH, true) {
-        return;
-    }
+/// On startup: restart scans and pick up enrichment that were interrupted last time, for
+/// connected drives. A cut-off scan restarts from the beginning (it is the quick part);
+/// enrichment carries on from the last file it saved.
+fn resume_interrupted(app: &AppHandle, catalog: &Arc<Catalog>) {
     let Ok(volumes) = catalog.volumes() else {
         return;
     };
-    for v in volumes
-        .into_iter()
-        .filter(|v| v.online && v.last_scan_at.is_some())
-    {
+    let auto_enrich = catalog.setting_enabled(settings::AUTO_ENRICH, true);
+    for v in volumes.into_iter().filter(|v| v.online) {
+        if catalog.scan_interrupted(v.id) {
+            log::info!("restarting the interrupted scan of \"{}\"", v.label);
+            crate::commands::spawn_scan(app.clone(), Arc::clone(catalog), v.id);
+            continue;
+        }
+        if !auto_enrich || v.last_scan_at.is_none() {
+            continue;
+        }
         if let Ok(c) = catalog.enrich_coverage(v.id) {
             if c.done < c.files {
                 log::info!(

@@ -28,7 +28,7 @@ pub fn list_archive(path: &Path, ext: &str, max_entries: usize) -> Option<Vec<Ar
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    guarded("archive", move || {
+    guarded("archive", path, move || {
         // Disc images list from their directory sectors only, so their size doesn't matter.
         if e == "iso" {
             return crate::iso::iso_entries(&p, max_entries);

@@ -4,9 +4,9 @@
 //! storecat volumes                     list detected and catalogued volumes
 //! storecat add <identity|path>         catalogue a detected volume (by identity) or a folder
 //! storecat scan <id|path> [--no-enrich] (re)scan a volume, then enrich it
-//! storecat enrich <id>                 hashes, metadata, thumbnails, text, archives
+//! storecat enrich <id> [--hdd|--ssd]   hashes, metadata, thumbnails, text, archives
 //! storecat search <query...>           search; --limit N --sort relevance|modified|size
-//! storecat dupes [--verify]            duplicate groups across all drives
+//! storecat dupes [--all] [--verify]    duplicate groups across all drives
 //! storecat export <id> <dir>           copy a volume's catalogue out
 //! storecat import <file>               bring a catalogue back in
 //! storecat ffmpeg [--download]         show or install the FFmpeg sidecar
@@ -21,8 +21,8 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context};
 use storecat_core::{
-    Catalog, DataDirs, EnrichOptions, EnrichPhase, EnrichProgress, ScanOptions, ScanPhase,
-    ScanProgress, SearchOptions, SortBy, Volume,
+    enrich::DiskMode, Catalog, DataDirs, DupQuery, DupScope, DupSort, EnrichOptions, EnrichPhase,
+    EnrichProgress, ScanOptions, ScanPhase, ScanProgress, SearchOptions, SortBy, Volume,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -242,7 +242,7 @@ fn cmd_scan(args: &[String]) -> anyhow::Result<()> {
         stats.skipped_symlinks
     );
     if !no_enrich {
-        run_enrich(&cat, volume.id)?;
+        run_enrich(&cat, volume.id, EnrichOptions::default())?;
     }
     Ok(())
 }
@@ -251,12 +251,24 @@ fn cmd_enrich(args: &[String]) -> anyhow::Result<()> {
     let id: i64 = args
         .first()
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| anyhow!("usage: storecat enrich <id>"))?;
+        .ok_or_else(|| anyhow!("usage: storecat enrich <id> [--hdd|--ssd] [--all-folders]"))?;
+    let disk = if args.iter().any(|a| a == "--hdd") {
+        DiskMode::Spinning
+    } else if args.iter().any(|a| a == "--ssd") {
+        DiskMode::Solid
+    } else {
+        DiskMode::Auto
+    };
+    let opts = EnrichOptions {
+        disk,
+        skip_bulk_folders: !args.iter().any(|a| a == "--all-folders"),
+        ..Default::default()
+    };
     let cat = open()?;
-    run_enrich(&cat, id)
+    run_enrich(&cat, id, opts)
 }
 
-fn run_enrich(cat: &Catalog, id: i64) -> anyhow::Result<()> {
+fn run_enrich(cat: &Catalog, id: i64, opts: EnrichOptions) -> anyhow::Result<()> {
     let v = cat.volume(id)?;
     let pending = cat
         .enrich_coverage(id)
@@ -284,7 +296,12 @@ fn run_enrich(cat: &Catalog, id: i64) -> anyhow::Result<()> {
         match &p.phase {
             EnrichPhase::Running => {
                 let line = format!(
-                    "\r  {:>8}/{:<8} {:>5} thumbs {:>5} texts {:>5} meta {:>6} hashed {:>5.0}s  {}",
+                    "\r  {} {:>8}/{:<8} {:>5} thumbs {:>5} texts {:>5} meta {:>6} hashed {:>5.0}s  {}",
+                    match p.pass {
+                        0 => "planning",
+                        1 => "quick   ",
+                        _ => "details ",
+                    },
                     p.done,
                     p.total,
                     p.thumbs,
@@ -304,7 +321,7 @@ fn run_enrich(cat: &Catalog, id: i64) -> anyhow::Result<()> {
         }
         let _ = out.flush();
     };
-    let s = cat.enrich(id, &EnrichOptions::default(), &progress)?;
+    let s = cat.enrich(id, &opts, &progress)?;
     println!(
         "{}: {} files in {:.1}s — {} hashed, {} metadata, {} thumbnails, {} texts, {} archives, {} errors.",
         if s.paused { "Paused" } else { "Enriched" },
@@ -405,8 +422,20 @@ fn cmd_search(args: &[String]) -> anyhow::Result<()> {
 
 fn cmd_dupes(args: &[String]) -> anyhow::Result<()> {
     let verify = args.iter().any(|a| a == "--verify");
+    let scope = if args.iter().any(|a| a == "--all") {
+        DupScope::All
+    } else {
+        DupScope::Mine
+    };
     let cat = open()?;
-    let summary = cat.duplicate_summary()?;
+    let page = cat.duplicate_page(&DupQuery {
+        scope,
+        sort: DupSort::Waste,
+        desc: true,
+        limit: 50,
+        offset: 0,
+    })?;
+    let summary = page.summary;
     println!(
         "{} duplicate groups, {} files, {} reclaimable (files ≥ {}).",
         summary.groups,
@@ -414,7 +443,7 @@ fn cmd_dupes(args: &[String]) -> anyhow::Result<()> {
         human_bytes(summary.waste),
         human_bytes(cat.hash_min_bytes())
     );
-    let mut groups = cat.duplicates(50, 0)?;
+    let mut groups = page.groups;
     if verify {
         for g in groups.iter_mut() {
             if !g.verified {
@@ -443,11 +472,12 @@ fn cmd_dupes(args: &[String]) -> anyhow::Result<()> {
         );
         for m in &g.members {
             println!(
-                "    {} {:<20} {}/{}",
+                "    {} {:<20} {}/{}{}",
                 if m.volume_online { " " } else { "○" },
                 truncate(&m.volume_label, 20),
                 m.path,
-                m.name
+                m.name,
+                if m.app_managed { "  (app copy)" } else { "" }
             );
         }
     }
@@ -532,9 +562,10 @@ fn print_help() {
          volumes                  List catalogued and connected volumes\n  \
          add <identity|path>      Catalogue a connected volume or a folder\n  \
          scan <id|path>           Scan (or rescan) a volume, then enrich it (--no-enrich to skip)\n  \
-         enrich <id>              Hashes, metadata, thumbnails, text and archive listings\n  \
+         enrich <id> [--hdd|--ssd] [--all-folders]\n                           \
+         Hashes, metadata, thumbnails, text and archive listings\n  \
          search <query> [-n N] [--sort relevance|modified|size]\n  \
-         dupes [--verify]         Duplicate groups across all drives\n  \
+         dupes [--all] [--verify] Duplicate groups (--all: app folders too)\n  \
          export <id> <dir>        Copy a volume's catalogue out\n  \
          import <file>            Bring a catalogue back in\n  \
          ffmpeg [--download]      Show or install the FFmpeg sidecar (video thumbnails)\n  \
@@ -632,6 +663,7 @@ fn cmd_backup(args: &[String]) -> anyhow::Result<()> {
         dest_root: positional[0].to_string(),
         conflict,
         verify: true,
+        checks: Vec::new(),
     };
     run_spec(&cat, spec, args.iter().any(|a| a == "--dry-run"))
 }

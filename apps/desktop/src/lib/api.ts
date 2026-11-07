@@ -90,6 +90,7 @@ export type ScanProgress = ScanPhase & {
 };
 
 export type EnrichPhase =
+  | { phase: "queued" }
   | { phase: "running" }
   | { phase: "paused" }
   | { phase: "done" }
@@ -97,6 +98,9 @@ export type EnrichPhase =
 
 export type EnrichProgress = EnrichPhase & {
   volume_id: number;
+  /** 0 = planning the read order, 1 = quick pass, 2 = text and video pass */
+  pass: number;
+  /** files done / to do in the current pass */
   done: number;
   total: number;
   hashed: number;
@@ -243,6 +247,8 @@ export interface DupMember {
   path: string;
   mtime: number;
   full_hash: string | null;
+  /** In a folder an app manages (caches, build output, app data): never removed. */
+  app_managed: boolean;
 }
 
 export interface DupGroup {
@@ -250,6 +256,10 @@ export interface DupGroup {
   size: number;
   count: number;
   waste: number;
+  /** Copies outside app-managed folders. */
+  user_copies: number;
+  /** [volume_id, file_id] of the copy Storecat would keep. */
+  suggested_keep: [number, number] | null;
   kind: Kind;
   name: string;
   verified: boolean;
@@ -260,6 +270,28 @@ export interface DupSummary {
   groups: number;
   files: number;
   waste: number;
+}
+
+export type DupScope = "mine" | "all";
+export type DupSort = "waste" | "size" | "count" | "name";
+
+export interface DupQuery {
+  scope: DupScope;
+  sort: DupSort;
+  desc: boolean;
+  limit: number;
+  offset: number;
+}
+
+export interface DupPage {
+  groups: DupGroup[];
+  summary: DupSummary;
+}
+
+export interface DupPick {
+  hash: string;
+  keep_volume_id: number;
+  keep_file_id: number;
 }
 
 export interface FfmpegStatus {
@@ -359,12 +391,13 @@ export const api = {
   startEnrich: (volumeId: number) => invoke<void>("start_enrich", { volumeId }),
   cancelEnrich: (volumeId: number) => invoke<void>("cancel_enrich", { volumeId }),
   enriching: () => call<number[]>("enriching", {}, []),
+  enrichQueued: () => call<number[]>("enrich_queued", {}, []),
   enrichCoverage: (volumeId: number) =>
     call<EnrichCoverage>("enrich_coverage", { volumeId }, { files: 0, done: 0, thumbs: 0, texts: 0, hashed: 0 }),
   resetEnrichment: (volumeId: number, keepHashes: boolean) =>
     invoke<void>("reset_enrichment", { volumeId, keepHashes }),
 
-  duplicates: (limit = 100, offset = 0) => call<DupGroup[]>("duplicates", { limit, offset }, []),
+  duplicates: (query: DupQuery) => invoke<DupPage>("duplicates", { query }),
   duplicateSummary: () => call<DupSummary>("duplicate_summary", {}, { groups: 0, files: 0, waste: 0 }),
   verifyGroup: (hash: string) => invoke<DupGroup>("verify_group", { hash }),
 
@@ -406,6 +439,8 @@ export interface JobSpec {
   dest_root: string;
   conflict: ConflictPolicy;
   verify: boolean;
+  /** Delete jobs: a condition each file must still meet when it is reached. */
+  checks?: string[];
 }
 
 export interface JobPlan {
@@ -507,8 +542,8 @@ export const ops = {
   sweepSpec: (destMount: string, kind: JobKind) => invoke<JobSpec>("sweep_spec", { destMount, kind }),
   pickFolders: () => invoke<string[]>("pick_folders"),
   pickFiles: () => invoke<string[]>("pick_files"),
-  duplicateCleanup: (hash: string, keepVolumeId: number, keepFileId: number) =>
-    invoke<Job>("duplicate_cleanup", { hash, keepVolumeId, keepFileId }),
+  /** Keep one copy per group and recycle the other copies of yours, in one job. */
+  duplicateCleanup: (picks: DupPick[]) => invoke<Job>("duplicate_cleanup", { picks }),
 
   tags: () => call<Tag[]>("tags", {}, []),
   tagItem: (volumeId: number, itemId: number, itemType: ItemType, tag: string) =>

@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use storecat_core::suggest::{RuleSettings, Suggestion};
 use storecat_core::{
-    settings, Catalog, CatalogStats, DetectedVolume, DownloadProgress, DupGroup, DupSummary,
-    EnrichCoverage, EnrichOptions, FfmpegStatus, FolderTree, ItemDetail, ItemStatus, ItemType, Job,
-    JobItem, JobKind, JobPlan, JobSpec, KindBytes, SavedSearch, ScanOptions, SearchOptions,
-    SearchResponse, Tag, Volume, VolumePatch,
+    settings, Catalog, CatalogStats, DetectedVolume, DownloadProgress, DupGroup, DupPage, DupPick,
+    DupQuery, DupSummary, EnrichCoverage, EnrichOptions, EnrichPhase, EnrichProgress, FfmpegStatus,
+    FolderTree, ItemDetail, ItemStatus, ItemType, Job, JobItem, JobKind, JobPlan, JobSpec,
+    KindBytes, SavedSearch, ScanOptions, SearchOptions, SearchResponse, Tag, Volume, VolumePatch,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -147,22 +147,51 @@ pub fn spawn_scan(app: AppHandle, catalog: Arc<Catalog>, volume_id: i64) {
 }
 
 /// Enrichment runs one volume at a time: it is IO and CPU heavy and the user is probably
-/// still using the machine.
+/// still using the machine. Volumes waiting for their turn are listed in `ENRICH_QUEUE`;
+/// pausing one takes it out, and its thread then gives up when the gate opens.
 static ENRICH_GATE: Mutex<()> = Mutex::new(());
+static ENRICH_QUEUE: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+
+fn queue() -> std::sync::MutexGuard<'static, Vec<i64>> {
+    ENRICH_QUEUE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 pub fn spawn_enrich(app: AppHandle, catalog: Arc<Catalog>, volume_id: i64) {
     if catalog.is_enriching(volume_id) {
         return;
     }
+    {
+        let mut q = queue();
+        if q.contains(&volume_id) {
+            return;
+        }
+        q.push(volume_id);
+    }
     std::thread::Builder::new()
         .name(format!("storecat-enrich-{volume_id}"))
         .spawn(move || {
-            let _gate = ENRICH_GATE.lock().unwrap_or_else(|e| e.into_inner());
+            let _gate = match ENRICH_GATE.try_lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    let _ = app.emit(
+                        "enrich-progress",
+                        EnrichProgress::bare(volume_id, EnrichPhase::Queued),
+                    );
+                    ENRICH_GATE.lock().unwrap_or_else(|e| e.into_inner())
+                }
+            };
+            {
+                let mut q = queue();
+                let Some(at) = q.iter().position(|&v| v == volume_id) else {
+                    return; // paused while queued
+                };
+                q.remove(at);
+            }
             if catalog.is_enriching(volume_id) || catalog.is_scanning(volume_id) {
                 return;
             }
             let emitter = app.clone();
-            let progress = move |p: storecat_core::EnrichProgress| {
+            let progress = move |p: EnrichProgress| {
                 let _ = emitter.emit("enrich-progress", &p);
             };
             let opts = EnrichOptions {
@@ -192,13 +221,36 @@ pub fn start_enrich(app: AppHandle, state: State<AppState>, volume_id: i64) -> C
 }
 
 #[tauri::command]
-pub fn cancel_enrich(state: State<AppState>, volume_id: i64) {
+pub fn cancel_enrich(app: AppHandle, state: State<AppState>, volume_id: i64) {
+    let was_queued = {
+        let mut q = queue();
+        let before = q.len();
+        q.retain(|&v| v != volume_id);
+        q.len() != before
+    };
+    if was_queued {
+        let _ = app.emit(
+            "enrich-progress",
+            EnrichProgress::bare(volume_id, EnrichPhase::Paused),
+        );
+    }
     state.catalog.cancel_enrich(volume_id);
 }
 
 #[tauri::command]
 pub fn enriching(state: State<AppState>) -> Vec<i64> {
     state.catalog.enriching_ids()
+}
+
+/// Forget every queued enrichment (when quitting); their threads give up when they wake.
+pub fn clear_enrich_queue() {
+    queue().clear();
+}
+
+/// Volumes waiting for another drive's enrichment to finish, in order.
+#[tauri::command]
+pub fn enrich_queued() -> Vec<i64> {
+    queue().clone()
 }
 
 #[tauri::command]
@@ -310,8 +362,11 @@ pub fn reveal_item(
 // ----- duplicates ----------------------------------------------------------------------
 
 #[tauri::command]
-pub fn duplicates(state: State<AppState>, limit: usize, offset: usize) -> CmdResult<Vec<DupGroup>> {
-    state.catalog.duplicates(limit, offset).map_err(err)
+pub async fn duplicates(app: AppHandle, query: DupQuery) -> CmdResult<DupPage> {
+    let catalog = Arc::clone(&app.state::<AppState>().catalog);
+    tauri::async_runtime::spawn_blocking(move || catalog.duplicate_page(&query).map_err(err))
+        .await
+        .map_err(err)?
 }
 
 #[tauri::command]
@@ -565,21 +620,19 @@ pub async fn pick_files(app: AppHandle) -> CmdResult<Vec<String>> {
         .collect())
 }
 
-/// Keep one copy of a verified duplicate group, recycle the others. Creates and starts a job.
+/// Keep one copy in each picked duplicate group and recycle the other copies of yours.
+/// Creates and starts one job.
 #[tauri::command]
-pub fn duplicate_cleanup(
-    app: AppHandle,
-    state: State<AppState>,
-    hash: String,
-    keep_volume_id: i64,
-    keep_file_id: i64,
-) -> CmdResult<Job> {
-    let spec = state
-        .catalog
-        .duplicate_cleanup_spec(&hash, (keep_volume_id, keep_file_id))
-        .map_err(err)?;
-    let job = state.catalog.create_job(&spec).map_err(err)?;
-    spawn_job(app.clone(), Arc::clone(&state.catalog), job.id);
+pub async fn duplicate_cleanup(app: AppHandle, picks: Vec<DupPick>) -> CmdResult<Job> {
+    let catalog = Arc::clone(&app.state::<AppState>().catalog);
+    let cat = Arc::clone(&catalog);
+    let job = tauri::async_runtime::spawn_blocking(move || -> CmdResult<Job> {
+        let spec = cat.duplicate_cleanup_spec(&picks).map_err(err)?;
+        cat.create_job(&spec).map_err(err)
+    })
+    .await
+    .map_err(err)??;
+    spawn_job(app.clone(), catalog, job.id);
     let _ = app.emit("jobs-changed", ());
     Ok(job)
 }

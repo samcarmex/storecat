@@ -12,8 +12,9 @@
 //! * `stale`      a drive whose catalogue is months old: plug it in to refresh.
 //! * `roles`      drives without a role, which the rules above need to choose destinations.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +61,13 @@ impl Default for RuleSettings {
 const RULES_KEY: &str = "rules";
 const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 const DAY: i64 = 86_400;
+/// Suggest removing OS leftovers from a drive once it has at least this many.
+const LEFTOVERS_MIN: u64 = 10;
+/// Leftover files per drive (folder, name, size), with the scan they were read after.
+#[allow(clippy::type_complexity)]
+static LEFTOVER_CACHE: Mutex<
+    Option<HashMap<VolumeId, ((Option<i64>, u64), Arc<Vec<(String, String, i64)>>)>>,
+> = Mutex::new(None);
 /// At most this many cold-folder suggestions per drive.
 const COLD_PER_VOLUME: usize = 5;
 /// Folder names never suggested for moving: system and application data.
@@ -189,6 +197,11 @@ impl Catalog {
             }
         }
         self.rule_duplicates(&rules, &mut out);
+        for v in &vols {
+            if let Err(e) = self.rule_leftovers(v, &mut out) {
+                log::warn!("leftover-files rule skipped for {}: {e}", v.label);
+            }
+        }
         rule_overlap(&vols, &mut out);
         rule_stale(&rules, &vols, now, &mut out);
         rule_roles(&vols, &mut out);
@@ -232,6 +245,7 @@ impl Catalog {
                         ),
                         conflict: ConflictPolicy::Skip,
                         verify: true,
+                        checks: Vec::new(),
                     },
                     needs: vec![v.id, d.id],
                 }),
@@ -448,6 +462,7 @@ impl Catalog {
                                 dest_root: join(&dmount, &refs),
                                 conflict: ConflictPolicy::Rename,
                                 verify: true,
+                                checks: Vec::new(),
                             },
                             needs: vec![v.id, d.id],
                         }),
@@ -484,6 +499,107 @@ impl Catalog {
         Ok(())
     }
 
+    /// Files macOS and Windows leave on drives (`._name`, `.DS_Store`, `Thumbs.db`):
+    /// offer one reviewable job that recycles them.
+    fn rule_leftovers(&self, v: &Volume, out: &mut Vec<Suggestion>) -> Result<()> {
+        let Some(mount) = v.mount_path.clone().or(v.last_mount_path.clone()) else {
+            return Ok(());
+        };
+        if !self.dirs.volume_db(v.id).exists() {
+            return Ok(());
+        }
+        // Reading every name takes most of a second on a big drive: remember the answer
+        // until the drive is scanned again.
+        let stamp = (v.last_scan_at, v.file_count);
+        let cached = LEFTOVER_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|m| m.get(&v.id))
+            .filter(|(s, _)| *s == stamp)
+            .map(|(_, rows)| Arc::clone(rows));
+        let found = match cached {
+            Some(rows) => rows,
+            None => {
+                let db = self.volume_db(v.id)?;
+                let mut stmt = db.conn().prepare(
+                    "SELECT d.path, f.name, f.size FROM files f JOIN dirs d ON d.id = f.dir_id
+                     WHERE substr(f.name, 1, 2) = '._'
+                        OR lower(f.name) IN ('.ds_store', 'thumbs.db', 'ehthumbs.db',
+                                             'ehthumbs_vista.db', '.localized')",
+                )?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<rusqlite::Result<Vec<(String, String, i64)>>>()?;
+                let rows = Arc::new(rows);
+                LEFTOVER_CACHE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_or_insert_with(HashMap::new)
+                    .insert(v.id, (stamp, Arc::clone(&rows)));
+                rows
+            }
+        };
+        let mut sources = Vec::new();
+        let mut checks = Vec::new();
+        let (mut bytes, mut mac, mut windows) = (0u64, 0u64, 0u64);
+        for (dir, name, size) in found.iter() {
+            let (dir, name, size) = (dir.as_str(), name.as_str(), *size);
+            if !crate::places::is_cleanable_leftover(name) {
+                continue;
+            }
+            let apple_double = name.starts_with("._");
+            if apple_double
+                || name.eq_ignore_ascii_case(".DS_Store")
+                || name.eq_ignore_ascii_case(".localized")
+            {
+                mac += 1;
+            } else {
+                windows += 1;
+            }
+            bytes += size.max(0) as u64;
+            sources.push(crate::catalog::join_abs(&mount, dir, name));
+            checks.push(if apple_double {
+                crate::ops::CHECK_APPLEDOUBLE.to_string()
+            } else {
+                String::new()
+            });
+        }
+        let n = sources.len() as u64;
+        if n < LEFTOVERS_MIN {
+            return Ok(());
+        }
+        let what = match (mac, windows) {
+            (_, 0) => "Mac leftover files",
+            (0, _) => "Windows thumbnail caches",
+            _ => "Mac and Windows leftover files",
+        };
+        out.push(Suggestion {
+            path: None,
+            key: format!("leftovers:{}:{}", v.id, n / 100),
+            rule: "leftovers".into(),
+            severity: Severity::Tip,
+            title: format!("{} {what} ({}) on {}", count(n), human(bytes), v.label),
+            body: "macOS leaves ._ and .DS_Store files on drives it writes to; Windows leaves                    Thumbs.db. Nothing here uses them and search already hides them. Each ._                    file is checked to be macOS metadata before it goes to the Recycle Bin."
+                .into(),
+            bytes,
+            volume_id: Some(v.id),
+            action: Some(SuggestionAction::Job {
+                spec: JobSpec {
+                    kind: JobKind::Delete,
+                    name: format!("Remove {} {what} from {}", count(n), v.label),
+                    sources,
+                    dest_root: String::new(),
+                    conflict: ConflictPolicy::Skip,
+                    verify: false,
+                    checks,
+                },
+                needs: vec![v.id],
+            }),
+        });
+        Ok(())
+    }
+
     fn rule_duplicates(&self, rules: &RuleSettings, out: &mut Vec<Suggestion>) {
         let Ok(d) = self.duplicate_summary() else {
             return;
@@ -498,7 +614,7 @@ impl Catalog {
             severity: Severity::Tip,
             title: format!("{} is taken up by duplicate copies", human(d.waste)),
             body: format!(
-                "{} files exist more than once across your drives. Verify a group, keep the copy you want, and the rest go to the recycle bin.",
+                "{} of your files exist more than once across your drives. Pick the copy to keep and the others go to the Recycle Bin. Copies inside app folders are left alone.",
                 count(d.files)
             ),
             bytes: d.waste,
@@ -776,8 +892,12 @@ fn human(b: u64) -> String {
         format!("{:.1} TB", f / GB / 1024.0)
     } else if f >= GB {
         format!("{:.1} GB", f / GB)
-    } else {
+    } else if f >= 100.0 * 1024.0 * 1024.0 {
         format!("{:.0} MB", f / 1024.0 / 1024.0)
+    } else if f >= 1024.0 * 1024.0 {
+        format!("{:.1} MB", f / 1024.0 / 1024.0)
+    } else {
+        format!("{:.0} KB", (f / 1024.0).max(1.0))
     }
 }
 
@@ -1035,5 +1155,44 @@ mod tests {
         assert!(cat.suggestions().unwrap().iter().all(|s| s.rule != "cold"));
         cat.reset_suggestions().unwrap();
         assert!(cat.suggestions().unwrap().iter().any(|s| s.rule == "cold"));
+    }
+
+    #[test]
+    fn leftover_files_become_one_reviewable_job() {
+        let data = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        let music = tree.path().join("Music");
+        std::fs::create_dir_all(&music).unwrap();
+        let mut apple = crate::places::APPLEDOUBLE_MAGIC.to_vec();
+        apple.extend_from_slice(&[0u8; 4092]);
+        for i in 0..11 {
+            std::fs::write(music.join(format!("song{i}.mp3")), b"tune").unwrap();
+            std::fs::write(music.join(format!("._song{i}.mp3")), &apple).unwrap();
+        }
+        std::fs::write(music.join(".DS_Store"), b"finder").unwrap();
+        std::fs::write(music.join("desktop.ini"), b"[.ShellClassInfo]").unwrap();
+        let cat = Catalog::open(crate::paths::DataDirs::at(data.path())).unwrap();
+        let v = cat.add_folder(tree.path(), Some("Stick")).unwrap();
+        cat.scan(v.id, &crate::scan::ScanOptions::default(), &|_| {})
+            .unwrap();
+
+        let s = cat.suggestions().unwrap();
+        let s = s.iter().find(|s| s.rule == "leftovers").unwrap();
+        assert_eq!(s.title, "12 Mac leftover files (44 KB) on Stick");
+        let Some(SuggestionAction::Job { spec, needs }) = &s.action else {
+            panic!("expected a job");
+        };
+        assert_eq!(needs, &vec![v.id]);
+        assert_eq!(spec.kind, JobKind::Delete);
+        assert_eq!(spec.sources.len(), 12);
+        assert!(spec.sources.iter().all(|p| !p.ends_with("desktop.ini")));
+        for (src, check) in spec.sources.iter().zip(&spec.checks) {
+            let apple_double = std::path::Path::new(src)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("._");
+            assert_eq!(check == crate::ops::CHECK_APPLEDOUBLE, apple_double);
+        }
     }
 }

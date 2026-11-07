@@ -37,7 +37,10 @@ use query::ParsedQuery;
 
 const WRITER_HEAP_BYTES: usize = 256 * 1024 * 1024;
 const NGRAM: usize = 3;
-pub const SCHEMA_VERSION: u32 = 3;
+/// Bumped when documents change shape without the Tantivy schema changing (a new flag
+/// bit, say): the index is then rebuilt from the catalogues on the next start.
+pub const SCHEMA_VERSION: u32 = 4;
+const VERSION_FILE: &str = "storecat-index-version";
 
 #[derive(Clone, Copy)]
 pub struct Fields {
@@ -247,8 +250,11 @@ impl SearchIndex {
             None
         };
         if let Some(existing) = &index {
-            if existing.schema() != schema {
-                log::warn!("search index schema changed; rebuilding");
+            let version = std::fs::read_to_string(dir.join(VERSION_FILE))
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok());
+            if existing.schema() != schema || version != Some(SCHEMA_VERSION) {
+                log::warn!("search index format changed; rebuilding");
                 index = None;
             }
         }
@@ -263,7 +269,9 @@ impl SearchIndex {
                     }
                 }
                 let mmap = tantivy::directory::MmapDirectory::open(dir)?;
-                Index::create(mmap, schema, tantivy::IndexSettings::default())?
+                let created = Index::create(mmap, schema, tantivy::IndexSettings::default())?;
+                std::fs::write(dir.join(VERSION_FILE), SCHEMA_VERSION.to_string())?;
+                created
             }
         };
         register_tokenizers(&index);
@@ -306,9 +314,14 @@ impl SearchIndex {
         doc.add_u64(f.kind, d.kind as u8 as u64);
         doc.add_u64(f.size, d.size);
         doc.add_i64(f.mtime, d.mtime);
-        doc.add_u64(f.flags, d.flags);
+        let flags = if d.item_type == ItemType::File && crate::places::is_os_leftover(d.name) {
+            d.flags | flags::OS_LEFTOVER
+        } else {
+            d.flags
+        };
+        doc.add_u64(f.flags, flags);
         for bit in 0..8 {
-            if d.flags & (1 << bit) != 0 {
+            if flags & (1 << bit) != 0 {
                 doc.add_u64(f.flag, 1 << bit);
             }
         }
@@ -623,8 +636,19 @@ impl SearchIndex {
             ));
         }
 
-        if must.is_empty() {
-            return Box::new(AllQuery);
+        let leftover = || -> Box<dyn Query> {
+            Box::new(TermQuery::new(
+                Term::from_field_u64(f.flag, flags::OS_LEFTOVER),
+                IndexRecordOption::Basic,
+            ))
+        };
+        if p.leftovers {
+            must.push((Occur::Must, leftover()));
+        } else {
+            if must.is_empty() {
+                must.push((Occur::Must, Box::new(AllQuery)));
+            }
+            must.push((Occur::MustNot, leftover()));
         }
         let base: Box<dyn Query> = Box::new(BooleanQuery::new(must));
         let demote = p.item_type.is_none() && (!p.terms.is_empty() || !p.phrases.is_empty());

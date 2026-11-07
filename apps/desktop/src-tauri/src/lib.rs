@@ -25,6 +25,11 @@ pub fn run() {
     diagnostics::init(&dirs.root);
 
     tauri::Builder::default()
+        // Must come first: a second launch (Start menu, autostart, the updater's relaunch)
+        // brings the running window forward instead of failing on the locked catalogue.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            shell::show_main(app, None);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -102,10 +107,12 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
+                    api.prevent_close();
                     let state = window.state::<AppState>();
                     if state.catalog.setting_enabled(shell::TRAY_MODE, false) {
-                        api.prevent_close();
                         let _ = window.hide();
+                    } else {
+                        shell::quit(window.app_handle());
                     }
                 }
             }
@@ -137,6 +144,7 @@ pub fn run() {
             commands::start_enrich,
             commands::cancel_enrich,
             commands::enriching,
+            commands::enrich_queued,
             commands::enrich_coverage,
             commands::reset_enrichment,
             commands::duplicates,

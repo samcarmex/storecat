@@ -55,7 +55,7 @@
   {:else if view === "storage"}
     <StorageView {store} bind:focusVolume={storageFocus} onNavigate={(v) => (view = v)} onReview={review} />
   {:else if view === "duplicates"}
-    <DuplicatesView {store} />
+    <DuplicatesView {store} onNavigate={(v) => (view = v)} />
   {:else if view === "settings"}
     <SettingsView {store} />
   {:else if view === "operations"}

@@ -30,7 +30,7 @@ pub fn kind_for_ext(ext: &str) -> Kind {
         | "css" | "scss" | "less" | "c" | "h" | "cpp" | "hpp" | "cc" | "cs" | "java" | "kt"
         | "swift" | "go" | "rb" | "php" | "sh" | "ps1" | "bat" | "cmd" | "sql" | "lua" | "r"
         | "m" | "mm" | "dart" | "scala" | "zig" | "nim" | "ex" | "exs" | "erl" | "hs" | "jl"
-        | "pl" | "vb" | "fs" | "ipynb" => Kind::Code,
+        | "pl" | "vb" | "fs" | "ipynb" | "cts" => Kind::Code,
         // Disk images
         "iso" | "img" | "dmg" | "vhd" | "vhdx" | "vmdk" | "qcow2" | "wim" | "esd" | "bin"
         | "cue" | "nrg" => Kind::DiskImage,
@@ -46,10 +46,12 @@ pub fn kind_for_ext(ext: &str) -> Kind {
 }
 
 /// Kind for a real file: the extension table plus the few cases where size disambiguates.
-/// `.ts` is both TypeScript and an MPEG transport stream; no source file is 20 MB.
+/// `.ts` and `.mts` are both TypeScript and MPEG transport streams; no source file is
+/// 20 MB. `.bin` is a CD image when it is big and any old blob of data when it is not.
 pub fn kind_for_file(ext: &str, size: u64) -> Kind {
     match ext {
-        "ts" if size < 20 * 1024 * 1024 => Kind::Code,
+        "ts" | "mts" if size < 20 * 1024 * 1024 => Kind::Code,
+        "bin" if size < 32 * 1024 * 1024 => Kind::Other,
         _ => kind_for_ext(ext),
     }
 }
@@ -88,6 +90,10 @@ mod tests {
         assert_eq!(kind_for_file("ts", 4_000), Kind::Code);
         assert_eq!(kind_for_file("ts", 900_000_000), Kind::Video);
         assert_eq!(kind_for_file("mov", 10), Kind::Video);
+        assert_eq!(kind_for_file("mts", 4_000), Kind::Code);
+        assert_eq!(kind_for_file("mts", 2_000_000_000), Kind::Video);
+        assert_eq!(kind_for_file("bin", 9_000), Kind::Other);
+        assert_eq!(kind_for_file("bin", 700_000_000), Kind::DiskImage);
     }
 
     #[test]
