@@ -442,7 +442,8 @@ mod tests {
     fn system_drive_has_a_profile() {
         let p = profiles(&["C:\\"]);
         assert_eq!(p.len(), 1);
+        // Bus type is always reported. SSD/HDD (seek penalty) is not: virtual disks such as
+        // the ones on CI runners leave it unanswered, so `media` may be None there.
         assert!(!p[0].bus.is_empty(), "{:?}", p[0]);
-        assert!(p[0].media.is_some());
     }
 }

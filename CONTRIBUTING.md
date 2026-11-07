@@ -24,6 +24,14 @@ cargo test --workspace
 
 CI runs the same commands on Windows, macOS and Linux and then builds the installers.
 
+**Changing npm dependencies.** Recent npm versions write only the current platform's
+native packages (Rollup, esbuild, the Tauri CLI) into `package-lock.json` when
+`node_modules` already exists, and `npm ci` then fails on the other platforms. After
+changing dependencies, regenerate the lockfile in a folder with no `node_modules`
+(copy `package.json` and `apps/desktop/package.json` there and run
+`npm install --package-lock-only`), and check it lists `@rollup/rollup-linux-x64-gnu`
+and `@rollup/rollup-darwin-arm64`.
+
 ## Ground rules
 
 - **Core stays portable.** `crates/core` must compile on Windows, macOS and Linux with no
