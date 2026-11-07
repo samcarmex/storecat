@@ -1,0 +1,172 @@
+/* Storecat design tokens — direction C "Bold / expressive".
+   Source of truth: PLAN.md §2 and design/canvas/project/Bold.dc.html. */
+
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("./assets/fonts/SpaceGrotesk-Variable.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./assets/fonts/Inter-Variable.woff2") format("woff2");
+}
+
+:root {
+  color-scheme: dark;
+
+  /* Ground and surfaces */
+  --bg: #0f1117;
+  --surface: #171a22;
+  --surface-2: #1d212b;
+  --line: rgba(255, 255, 255, 0.07);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --hover: rgba(255, 255, 255, 0.05);
+
+  /* Text */
+  --fg: #f2f3f5;
+  --fg-muted: #9aa0ad;
+  --fg-soft: #c9cdd6;
+  --on-accent: #0f1117;
+
+  /* Accent and semantic colours */
+  --accent: #ff6a3d;
+  --accent-soft: rgba(255, 106, 61, 0.16);
+  --accent-line: rgba(255, 106, 61, 0.5);
+  --teal: #5ee0c8;      /* SSD / NVMe, connected */
+  --amber: #f5c451;     /* HDD */
+  --indigo: #8e9bff;    /* network */
+  --purple: #c084fc;    /* cloud */
+  --danger: #ff5c5c;
+
+  /* Content-kind colours (storage bars) */
+  --kind-video: var(--accent);
+  --kind-images: var(--amber);
+  --kind-audio: var(--indigo);
+  --kind-docs: var(--teal);
+  --kind-other: #4a5060;
+
+  /* Type */
+  --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, Consolas, "Cascadia Mono", monospace;
+
+  /* Shape and rhythm */
+  --radius-card: 16px;
+  --radius-pill: 999px;
+  --radius-tile: 10px;
+  --gap: 18px;
+  --control-h: 36px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
+}
+
+#app {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+a {
+  color: #ffb39b;
+}
+a:hover {
+  color: #ffd2c2;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Shared primitives */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+}
+
+.btn {
+  height: var(--control-h);
+  padding: 0 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.btn.primary:hover {
+  filter: brightness(1.08);
+}
+.btn[disabled] {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.muted {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+/* Text selection in the app's accent */
+::selection {
+  background: var(--accent-soft);
+}
+
+/* Scrollbars that match the ground */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a2f3b transparent;
+}

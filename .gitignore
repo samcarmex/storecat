@@ -1,0 +1,35 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+
+# Node
+node_modules/
+dist/
+.svelte-kit/
+*.tsbuildinfo
+
+# Tauri
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/target/
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local data
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.local
+
+# Local working files, not part of the published project
+.claude/
+PLAN.md
+design/

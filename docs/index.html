@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storecat</title>
+<meta name="description" content="A fast, private catalogue of every drive you own. Search first, plug in second.">
+<link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0f1117; --surface: #171a22; --surface-2: #1d212b; --line: #2a2f3b;
+    --text: #eef0f5; --muted: #9aa1b2; --accent: #ff6a3d; --accent-2: #ffc53d;
+    --accent-soft: rgba(255, 106, 61, 0.14);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 Inter, system-ui, sans-serif; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  h1, h2, h3 { font-family: "Space Grotesk", Inter, sans-serif; line-height: 1.1; margin: 0; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  nav { display: flex; align-items: center; gap: 24px; padding: 20px 0; }
+  nav .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font: 700 20px "Space Grotesk"; }
+  nav .brand img { width: 36px; height: 36px; }
+  nav .links { margin-left: auto; display: flex; gap: 20px; font-weight: 500; }
+  nav .links a { color: var(--muted); }
+  nav .links a:hover { color: var(--text); text-decoration: none; }
+
+  .hero { display: grid; grid-template-columns: 1.05fr 1fr; gap: 48px; align-items: center; padding: 56px 0 72px; }
+  .hero h1 { font-size: clamp(44px, 7vw, 84px); letter-spacing: -0.02em; }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .hero p.lead { font-size: 19px; color: var(--muted); max-width: 34em; margin: 24px 0 32px; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 13px 22px; border-radius: 12px; font-weight: 600; }
+  .btn.primary { background: var(--accent); color: #15161b; }
+  .btn.ghost { border: 1px solid var(--line); color: var(--text); }
+  .btn:hover { text-decoration: none; filter: brightness(1.08); }
+  .cta code { font: 14px ui-monospace, Consolas, monospace; color: var(--muted); background: var(--surface); padding: 8px 12px; border-radius: 8px; }
+  .hero .shot { border-radius: 16px; border: 1px solid var(--line); box-shadow: 0 30px 80px rgba(0,0,0,.5), 0 0 0 8px var(--accent-soft); width: 100%; height: auto; }
+
+  section { padding: 72px 0; border-top: 1px solid var(--line); }
+  section > .wrap > h2 { font-size: clamp(30px, 4vw, 44px); margin-bottom: 12px; }
+  section > .wrap > p.sub { color: var(--muted); font-size: 18px; margin: 0 0 40px; max-width: 40em; }
+
+  .pillars { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .pillar { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 24px; }
+  .pillar h3 { font-size: 22px; margin-bottom: 8px; }
+  .pillar h3 span { color: var(--accent); }
+  .pillar p { margin: 0; color: var(--muted); font-size: 15px; }
+
+  .feature { display: grid; grid-template-columns: 1fr 1.3fr; gap: 48px; align-items: center; margin-bottom: 72px; }
+  .feature:last-child { margin-bottom: 0; }
+  .feature.flip { grid-template-columns: 1.3fr 1fr; }
+  .feature.flip .text { order: 2; }
+  .feature h3 { font-size: 30px; margin-bottom: 14px; }
+  .feature p, .feature li { color: var(--muted); }
+  .feature ul { padding-left: 20px; margin: 12px 0 0; }
+  .feature img { width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--line); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .chips code { font: 13px ui-monospace, Consolas, monospace; background: var(--accent-soft); color: var(--accent); padding: 4px 10px; border-radius: 999px; }
+
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+  .card h3 { font-size: 18px; margin-bottom: 6px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+
+  .downloads { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .downloads .card a.btn { margin-top: 16px; }
+
+  footer { border-top: 1px solid var(--line); padding: 32px 0 48px; color: var(--muted); font-size: 14px; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; }
+
+  @media (max-width: 900px) {
+    .hero, .feature, .feature.flip { grid-template-columns: 1fr; }
+    .feature.flip .text { order: 0; }
+    .pillars { grid-template-columns: 1fr 1fr; }
+    .grid3, .downloads { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 560px) {
+    .wrap { padding: 0 16px; }
+    .pillars { grid-template-columns: 1fr; }
+    nav .links a.hide-sm { display: none; }
+  }
+</style>
+</head>
+<body>
+<header class="wrap">
+  <nav>
+    <a class="brand" href="#"><img src="assets/logo.svg" alt="">Storecat</a>
+    <div class="links">
+      <a class="hide-sm" href="#features">Features</a>
+      <a class="hide-sm" href="guide.html">Guide</a>
+      <a href="#download">Download</a>
+      <a href="https://github.com/samcarmex/storecat">GitHub</a>
+    </div>
+  </nav>
+  <div class="hero">
+    <div>
+      <h1>Search first.<br><em>Plug in second.</em></h1>
+      <p class="lead">Storecat catalogues every drive you own, then finds any file in milliseconds
+        whether the drive is plugged in or sitting in a drawer. It shows where your space
+        goes and moves files between drives without ever losing one.</p>
+      <div class="cta">
+        <a class="btn primary" href="#download">Download for free</a>
+        <a class="btn ghost" href="https://github.com/samcarmex/storecat">Source code</a>
+      </div>
+      <div class="cta" style="margin-top:16px"><code>winget install Storecat.Storecat</code></div>
+    </div>
+    <img class="shot" src="assets/search.png" alt="Storecat searching across every drive" width="1920" height="1230">
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <div class="pillars">
+      <div class="pillar"><h3><span>Find</span> anything</h3><p>Names, paths, tags, photo and audio metadata, text inside documents and files inside archives and disc images.</p></div>
+      <div class="pillar"><h3><span>See</span> it all</h3><p>Every drive with its type, connection, health and free space, and a treemap of what fills it.</p></div>
+      <div class="pillar"><h3><span>Move</span> safely</h3><p>Copies are hashed and verified before an original is touched, and every job survives a crash.</p></div>
+      <div class="pillar"><h3><span>Keep</span> it private</h3><p>Everything stays on your computer. Open source under the GPL.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <h2>Built for a shelf full of drives</h2>
+    <p class="sub">Plug a drive in once. From then on Storecat knows what is on it.</p>
+
+    <div class="feature">
+      <div class="text">
+        <h3>Search every drive at once</h3>
+        <p>Results appear as you type, from drives that are connected and drives that aren't.
+          When a file is offline, Storecat tells you which drive to fetch.</p>
+        <div class="chips"><code>kind:video</code><code>size:&gt;1gb</code><code>modified:2023</code><code>drive:seagate</code><code>content:"invoice"</code><code>tag:client-x</code></div>
+      </div>
+      <img src="assets/detail.png" alt="A search result with thumbnail, metadata and tags" loading="lazy" width="1920" height="1230">
+    </div>
+
+    <div class="feature flip">
+      <div class="text">
+        <h3>See where the space went</h3>
+        <p>A treemap of each drive, coloured by what fills it. Click a block to open the
+          folder. Free space is split into fast and spinning storage so you know where new
+          work should live.</p>
+      </div>
+      <img src="assets/storage.png" alt="Storage treemap and suggestions" loading="lazy" width="1920" height="1230">
+    </div>
+
+    <div class="feature">
+      <div class="text">
+        <h3>Suggestions you approve</h3>
+        <p>Storecat notices what you'd want to know and turns each finding into a job you can review:</p>
+        <ul>
+          <li>a drive reporting a health warning needs a rescue copy</li>
+          <li>a year-old project is taking up the SSD</li>
+          <li>Desktop and Downloads need a sweep</li>
+          <li>the same 40 GB lives on three drives</li>
+        </ul>
+        <p>Nothing moves until you press start.</p>
+      </div>
+      <img src="assets/operations.png" alt="A verified move job" loading="lazy" width="1920" height="1230">
+    </div>
+
+    <div class="feature flip">
+      <div class="text">
+        <h3>Know your drives</h3>
+        <p>SSD, NVMe or spinning disk. USB, SATA or network. Model, health and when you last
+          saw it. Give each drive a role and Storecat knows where archives and backups belong.</p>
+      </div>
+      <img src="assets/drives.png" alt="Drive cards with type, connection and health" loading="lazy" width="1920" height="1230">
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>And the small things</h2>
+    <p class="sub">The details that make a catalogue worth keeping.</p>
+    <div class="grid3">
+      <div class="card"><h3>Quick search anywhere</h3><p>Ctrl+Shift+Space opens a search bar over any app from the tray.</p></div>
+      <div class="card"><h3>Duplicates across drives</h3><p>Found by quick hash, confirmed by full BLAKE3 before anything is recycled.</p></div>
+      <div class="card"><h3>Network shares and discs</h3><p>NAS shares, mapped drives, DVDs and ISO images. An offline share never stalls the app.</p></div>
+      <div class="card"><h3>Catalogue travels with the drive</h3><p>A copy is written to each drive so another computer can import it.</p></div>
+      <div class="card"><h3>Command line too</h3><p>Scan, search, tree, suggest and backup from a terminal with <code>storecat</code>.</p></div>
+      <div class="card"><h3>Updates you control</h3><p>Signed updates from GitHub, checked once a day, installed when you click.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="download">
+  <div class="wrap">
+    <h2>Download</h2>
+    <p class="sub">Free and open source. Windows is the primary platform; macOS and Linux builds are newer.</p>
+    <div class="downloads">
+      <div class="card"><h3>Windows 10 and 11</h3><p>Installer (.exe) or MSI, or <code>winget install Storecat.Storecat</code>.</p>
+        <a class="btn primary" href="https://github.com/samcarmex/storecat/releases/latest">Get it for Windows</a></div>
+      <div class="card"><h3>macOS 11+</h3><p>Apple silicon and Intel disk images. Not notarised yet: right-click › Open the first time.</p>
+        <a class="btn ghost" href="https://github.com/samcarmex/storecat/releases/latest">Get it for macOS</a></div>
+      <div class="card"><h3>Linux</h3><p>AppImage, .deb and .rpm for x86_64.</p>
+        <a class="btn ghost" href="https://github.com/samcarmex/storecat/releases/latest">Get it for Linux</a></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>Storecat is free software under the GNU GPL v3 or later.</span>
+    <span><a href="guide.html">User guide</a> · <a href="https://github.com/samcarmex/storecat/issues">Report a problem</a> · <a href="https://github.com/samcarmex/storecat/blob/main/CHANGELOG.md">Changelog</a></span>
+  </div>
+</footer>
+</body>
+</html>

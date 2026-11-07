@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: Storecat.Storecat
+PackageVersion: 0.9.0
+PackageLocale: en-US
+Publisher: Storecat contributors
+PublisherUrl: https://github.com/samcarmex/storecat
+PublisherSupportUrl: https://github.com/samcarmex/storecat/issues
+PackageName: Storecat
+PackageUrl: https://github.com/samcarmex/storecat
+License: GPL-3.0-or-later
+LicenseUrl: https://github.com/samcarmex/storecat/blob/main/LICENSE
+Copyright: Copyright (c) 2026 Storecat contributors
+ShortDescription: Catalogue every drive you own and search it offline, even when the drive is unplugged.
+Description: |-
+  Storecat records every file on your external drives, NAS shares and folders: names, paths,
+  sizes, dates, metadata, thumbnails and document text. Search all of it instantly whether
+  the drive is connected or not, find duplicates across drives, run verified backup-and-move
+  jobs, and get suggestions for what should live on fast storage and what belongs on an
+  archive disk. Everything stays on your computer.
+Moniker: storecat
+Tags:
+  - catalog
+  - catalogue
+  - disk-catalog
+  - drives
+  - duplicates
+  - file-search
+  - offline
+  - backup
+  - storage
+ReleaseNotesUrl: https://github.com/samcarmex/storecat/releases/tag/v0.9.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

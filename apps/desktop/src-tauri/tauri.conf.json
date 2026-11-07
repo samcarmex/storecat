@@ -1,0 +1,108 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Storecat",
+  "version": "0.9.0",
+  "identifier": "io.storecat.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Storecat",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true,
+        "visible": false,
+        "backgroundColor": "#0f1117",
+        "theme": "Dark"
+      },
+      {
+        "label": "palette",
+        "url": "index.html",
+        "title": "Storecat quick search",
+        "width": 760,
+        "height": 520,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "center": true,
+        "visible": false,
+        "backgroundColor": "#0f1117",
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: thumb: http://thumb.localhost http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Utility",
+    "shortDescription": "Search your drives before you plug them in",
+    "longDescription": "Storecat catalogues every drive you own so you can search files on drives that are not connected.",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "English"
+        ],
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "../../../packaging/installer/nsis-header.bmp",
+        "sidebarImage": "../../../packaging/installer/nsis-sidebar.bmp",
+        "startMenuFolder": "Storecat"
+      },
+      "wix": {
+        "bannerPath": "../../../packaging/installer/wix-banner.bmp",
+        "dialogImagePath": "../../../packaging/installer/wix-dialog.bmp",
+        "upgradeCode": "6a1f5b0e-7f3c-4c0e-9d0e-2f5b9c1a7e41"
+      }
+    },
+    "publisher": "Storecat contributors",
+    "copyright": "Copyright © 2026 Storecat contributors. GPL-3.0-or-later.",
+    "homepage": "https://github.com/samcarmex/storecat",
+    "license": "GPL-3.0-or-later",
+    "licenseFile": "../../../LICENSE",
+    "createUpdaterArtifacts": false,
+    "linux": {
+      "deb": {
+        "depends": []
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlFQkVBRkNBODIzMUY3MTgKUldRWTl6R0N5cSsrbmhETEN6WWVjWG1MZDVPTEUzMnYvdEovQnlML3pNNnVMd09WZzF3d3JMZkUK",
+      "endpoints": [
+        "https://github.com/samcarmex/storecat/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

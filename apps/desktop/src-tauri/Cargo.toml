@@ -1,0 +1,33 @@
+[package]
+name = "storecat-desktop"
+description = "Storecat desktop app (Tauri shell)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "storecat_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["image-png", "tray-icon"] }
+serde.workspace = true
+serde_json.workspace = true
+storecat-core.workspace = true
+storecat-platform.workspace = true
+tauri-plugin-opener = "2.5.5"
+tauri-plugin-dialog = "2.7.3"
+log = "0.4.35"
+time = { version = "0.3.41", features = ["formatting"] }
+storecat-extract = { version = "0.9.0", path = "../../../crates/extract" }
+tauri-plugin-global-shortcut = "2.3.2"
+tauri-plugin-autostart = "2.5.1"
+anyhow.workspace = true
+tauri-plugin-updater = "2.14.1"
+tauri-plugin-process = "2.4.0"

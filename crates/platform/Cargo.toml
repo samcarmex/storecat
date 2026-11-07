@@ -1,0 +1,23 @@
+[package]
+name = "storecat-platform"
+description = "Per-OS services for Storecat: volume identity, drive type, change journals"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+log = "0.4.35"
+storecat-core.workspace = true
+serde_json.workspace = true
+sysinfo = "0.36.1"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_IO",
+]}

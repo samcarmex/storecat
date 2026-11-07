@@ -1,0 +1,16 @@
+{
+  "name": "storecat-monorepo",
+  "private": true,
+  "version": "0.9.0",
+  "description": "Storecat: search your drives before you plug them in",
+  "license": "GPL-3.0-or-later",
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/desktop",
+    "build": "npm run build -w apps/desktop",
+    "check": "npm run check -w apps/desktop",
+    "tauri": "npm run tauri -w apps/desktop --"
+  }
+}

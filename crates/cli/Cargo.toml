@@ -1,0 +1,22 @@
+[package]
+name = "storecat-cli"
+description = "Command-line interface for Storecat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "storecat"
+path = "src/main.rs"
+
+[dependencies]
+storecat-core.workspace = true
+storecat-platform.workspace = true
+storecat-extract.workspace = true
+anyhow.workspace = true
+env_logger = "0.11.11"
+log = "0.4.35"
+time = "0.3.45"
