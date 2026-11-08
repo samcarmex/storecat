@@ -87,6 +87,9 @@ export type ScanProgress = ScanPhase & {
   errors: number;
   elapsed_ms: number;
   current: string;
+  /** Committing: files brought into the search index so far, of index_total. */
+  indexed?: number;
+  index_total?: number;
 };
 
 export type EnrichPhase =
@@ -137,7 +140,14 @@ export interface SearchHit {
   volume_online: boolean;
 }
 
-export type SortBy = "relevance" | "modified_desc" | "size_desc";
+export type SortBy =
+  | "relevance"
+  | "modified_desc"
+  | "modified_asc"
+  | "size_desc"
+  | "size_asc"
+  | "name_asc"
+  | "name_desc";
 
 export interface SearchOptions {
   limit: number;
@@ -151,6 +161,13 @@ export interface SearchResponse {
   total: number;
   elapsed_ms: number;
   text: string;
+  /** The order the hits are in (a filter-only "relevance" query comes back by name). */
+  sort: SortBy;
+}
+
+export interface ExtCount {
+  ext: string;
+  files: number;
 }
 
 export interface FileMeta {
@@ -229,6 +246,8 @@ export interface ItemDetail {
 
 export interface CatalogStats {
   index_rebuilding: boolean;
+  index_rebuild_done?: number;
+  index_rebuild_total?: number;
   volumes: number;
   online: number;
   files: number;
@@ -281,6 +300,12 @@ export interface DupQuery {
   desc: boolean;
   limit: number;
   offset: number;
+  /** Words that must appear in a copy's name or folder. */
+  text?: string;
+  kinds?: Kind[];
+  volume_id?: number | null;
+  /** Only groups that can be cleaned up now. */
+  ready_only?: boolean;
 }
 
 export interface DupPage {
@@ -377,7 +402,7 @@ export const api = {
     call<SearchResponse>(
       "search",
       { query, options: { limit: 300, offset: 0, sort: "relevance", volume_ids: null, ...options } },
-      { hits: [], total: 0, elapsed_ms: 0, text: query },
+      { hits: [], total: 0, elapsed_ms: 0, text: query, sort: options.sort ?? "relevance" },
     ),
   itemDetail: (volumeId: number, itemId: number, itemType: ItemType) =>
     invoke<ItemDetail>("item_detail", { volumeId, itemId, itemType }),
@@ -398,6 +423,7 @@ export const api = {
     invoke<void>("reset_enrichment", { volumeId, keepHashes }),
 
   duplicates: (query: DupQuery) => invoke<DupPage>("duplicates", { query }),
+  extensionCounts: (kind: Kind) => call<ExtCount[]>("extension_counts", { kind }, []),
   duplicateSummary: () => call<DupSummary>("duplicate_summary", {}, { groups: 0, files: 0, waste: 0 }),
   verifyGroup: (hash: string) => invoke<DupGroup>("verify_group", { hash }),
 

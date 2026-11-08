@@ -38,6 +38,8 @@ pub(super) struct Item {
     pub prior_stages: u32,
     /// Detail pass: the metadata the quick pass stored (video duration, index text).
     pub prior_meta: Option<String>,
+    /// Document text found by an earlier run, for re-indexing an artwork-only job.
+    pub prior_text: Option<String>,
 }
 
 /// A worker's answer for one file.
@@ -48,6 +50,8 @@ pub(super) struct Outcome {
     pub needs_detail: bool,
     /// Metadata to index the file with (new, or the quick pass's).
     pub meta_json: Option<String>,
+    /// Text found by an earlier run, when this run didn't read any.
+    pub prior_text: Option<String>,
     /// Everything recorded for the file once this outcome is written.
     pub stages_all: u32,
 }
@@ -236,6 +240,7 @@ pub(super) fn process(ctx: &Ctx, item: Item) -> Outcome {
         needs_detail,
         meta_json,
         stages_all,
+        prior_text: item.prior_text,
     }
 }
 
@@ -274,5 +279,6 @@ pub(super) fn failed(file: FileRecord, why: &str) -> Outcome {
         needs_detail: false,
         meta_json: None,
         stages_all: 0,
+        prior_text: None,
     }
 }

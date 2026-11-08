@@ -37,9 +37,31 @@ use query::ParsedQuery;
 
 const WRITER_HEAP_BYTES: usize = 256 * 1024 * 1024;
 const NGRAM: usize = 3;
+/// A name's first ten characters packed six bits each, so sorting the number sorts names
+/// A to Z: spaces and punctuation first, then digits, then letters (case ignored), then
+/// anything else. Names that share their first ten characters tie.
+pub fn name_key(name: &str) -> u64 {
+    let mut key = 0u64;
+    let mut n = 0;
+    for c in name.chars().flat_map(char::to_lowercase) {
+        if n == 10 {
+            break;
+        }
+        let code = match c {
+            '0'..='9' => 2 + (c as u64 - '0' as u64),
+            'a'..='z' => 12 + (c as u64 - 'a' as u64),
+            c if c.is_alphabetic() => 38,
+            _ => 1,
+        };
+        key = (key << 6) | code;
+        n += 1;
+    }
+    key << (6 * (10 - n))
+}
+
 /// Bumped when documents change shape without the Tantivy schema changing (a new flag
 /// bit, say): the index is then rebuilt from the catalogues on the next start.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 const VERSION_FILE: &str = "storecat-index-version";
 
 #[derive(Clone, Copy)]
@@ -64,6 +86,8 @@ pub struct Fields {
     pub tags: Field,
     /// Whole tags, lowercased, for `tag:` filters.
     pub tag: Field,
+    /// The name's first characters packed into a number, for sorting by name.
+    pub name_key: Field,
 }
 
 pub struct SearchIndex {
@@ -160,6 +184,7 @@ fn build_schema() -> (Schema, Fields) {
         meta: sb.add_text_field("meta", words.clone()),
         tags: sb.add_text_field("tags", words),
         tag: sb.add_text_field("tag", STRING),
+        name_key: sb.add_u64_field("name_key", FAST),
     };
     (sb.build(), fields)
 }
@@ -279,7 +304,22 @@ impl SearchIndex {
             .map(|n| n.get())
             .unwrap_or(2)
             .clamp(1, 8);
-        let writer = index.writer_with_num_threads(threads, WRITER_HEAP_BYTES)?;
+        // A previous Storecat that is still shutting down (an update, a quick relaunch) holds
+        // the writer lock for a few seconds: wait for it rather than fail to start.
+        let mut waited = 0;
+        let writer = loop {
+            match index.writer_with_num_threads(threads, WRITER_HEAP_BYTES) {
+                Ok(w) => break w,
+                Err(tantivy::TantivyError::LockFailure(_, _)) if waited < 150 => {
+                    if waited == 0 {
+                        log::warn!("search index is locked by another Storecat; waiting");
+                    }
+                    waited += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -309,6 +349,7 @@ impl SearchIndex {
         doc.add_u64(f.item_type, d.item_type as u64);
         doc.add_text(f.name, d.name);
         doc.add_text(f.name_ngram, d.name);
+        doc.add_u64(f.name_key, name_key(d.name));
         doc.add_text(f.path, d.path);
         doc.add_text(f.ext, d.ext);
         doc.add_u64(f.kind, d.kind as u8 as u64);
@@ -452,35 +493,32 @@ impl SearchIndex {
         let searcher = self.reader.searcher();
         let f = self.fields;
 
+        let top = || TopDocs::with_limit(limit.max(1)).and_offset(offset);
+        let by = |field: &str, order: Order| -> Result<(Vec<(f32, tantivy::DocAddress)>, usize)> {
+            let (hits, count) = match field {
+                "mtime" => {
+                    let (t, c) = searcher.search(
+                        &query,
+                        &(top().order_by_fast_field::<i64>("mtime", order), Count),
+                    )?;
+                    (t.into_iter().map(|(_, a)| a).collect::<Vec<_>>(), c)
+                }
+                f => {
+                    let (t, c) = searcher
+                        .search(&query, &(top().order_by_fast_field::<u64>(f, order), Count))?;
+                    (t.into_iter().map(|(_, a)| a).collect(), c)
+                }
+            };
+            Ok((hits.into_iter().map(|a| (0.0, a)).collect(), count))
+        };
         let (addrs, total): (Vec<(f32, tantivy::DocAddress)>, usize) = match sort {
-            SortBy::Relevance => searcher.search(
-                &query,
-                &(TopDocs::with_limit(limit.max(1)).and_offset(offset), Count),
-            )?,
-            SortBy::ModifiedDesc => {
-                let (top, count) = searcher.search(
-                    &query,
-                    &(
-                        TopDocs::with_limit(limit.max(1))
-                            .and_offset(offset)
-                            .order_by_fast_field::<i64>("mtime", Order::Desc),
-                        Count,
-                    ),
-                )?;
-                (top.into_iter().map(|(_, a)| (0.0, a)).collect(), count)
-            }
-            SortBy::SizeDesc => {
-                let (top, count) = searcher.search(
-                    &query,
-                    &(
-                        TopDocs::with_limit(limit.max(1))
-                            .and_offset(offset)
-                            .order_by_fast_field::<u64>("size", Order::Desc),
-                        Count,
-                    ),
-                )?;
-                (top.into_iter().map(|(_, a)| (0.0, a)).collect(), count)
-            }
+            SortBy::Relevance => searcher.search(&query, &(top(), Count))?,
+            SortBy::ModifiedDesc => by("mtime", Order::Desc)?,
+            SortBy::ModifiedAsc => by("mtime", Order::Asc)?,
+            SortBy::SizeDesc => by("size", Order::Desc)?,
+            SortBy::SizeAsc => by("size", Order::Asc)?,
+            SortBy::NameAsc => by("name_key", Order::Asc)?,
+            SortBy::NameDesc => by("name_key", Order::Desc)?,
         };
 
         let mut hits = Vec::with_capacity(addrs.len());
@@ -1103,5 +1141,32 @@ mod tests {
             .search(&query::parse(""), None, SortBy::Relevance, 10, 0)
             .unwrap();
         assert_eq!(r.total, 1);
+    }
+
+    #[test]
+    fn name_key_sorts_names() {
+        let mut names = vec![
+            "zebra.mp3",
+            "Alpha.mp3",
+            "_notes",
+            "10 songs",
+            "apple",
+            "Äpfel",
+            "2 songs",
+        ];
+        names.sort_by_key(|n| name_key(n));
+        assert_eq!(
+            names,
+            vec![
+                "_notes",
+                "10 songs",
+                "2 songs",
+                "Alpha.mp3",
+                "apple",
+                "zebra.mp3",
+                "Äpfel"
+            ]
+        );
+        assert!(name_key("abc") < name_key("abcd"));
     }
 }

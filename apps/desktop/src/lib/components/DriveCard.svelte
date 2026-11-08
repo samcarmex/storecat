@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { ops, volumePhotoUrl, type Role, type Volume } from "../api";
   import type { AppStore } from "../store.svelte";
   import { ago, busLabel, bytes, count, duration, HEALTH_COLOR, HEALTH_LABEL, MEDIA_COLOR, MEDIA_LABEL } from "../format";
@@ -29,9 +30,42 @@
   const scanning = $derived(store.isScanning(v.id));
   const enriching = $derived(store.isEnriching(v.id));
   const color = $derived(MEDIA_COLOR[v.media_type]);
-  const used = $derived(Math.max(0, v.capacity - v.free));
+  /**
+   * Free space is held at its value from when a scan or enrichment started until it ends.
+   * The catalogue itself may live on this drive, and its database and index grow and
+   * shrink while they are written, so the live figure would wobble for no real reason.
+   */
+  let heldFree = $state<number | null>(null);
+  $effect(() => {
+    const busy = scanning || enriching;
+    const free = v.free;
+    untrack(() => {
+      if (!busy) heldFree = null;
+      else if (heldFree === null) heldFree = free;
+    });
+  });
+  const free = $derived(heldFree ?? v.free);
+  const used = $derived(Math.max(0, v.capacity - free));
   const usedPct = $derived(v.capacity > 0 ? Math.min(100, (used / v.capacity) * 100) : 0);
-  const freeText = $derived(v.capacity > 0 ? bytes(v.free) : bytes(v.total_bytes));
+  const freeText = $derived(v.capacity > 0 ? bytes(free) : bytes(v.total_bytes));
+  /**
+   * A scan can't know how many files there are until it has seen them all, so estimate:
+   * against the last scan's file count on a rescan, or against the space in use on a
+   * drive's first scan. Capped below 100 because the estimate is only ever close.
+   */
+  const scanPct = $derived.by(() => {
+    if (!progress || progress.phase !== "walking") return null;
+    let pct: number | null = null;
+    if (v.file_count > 1000) pct = (progress.files / v.file_count) * 100;
+    // A folder reports its whole drive's space, which says nothing about the folder.
+    else if (v.source === "device" && v.capacity > 0 && used > 0) pct = (progress.bytes / used) * 100;
+    return pct === null ? null : Math.min(99, pct);
+  });
+  const indexPct = $derived(
+    progress?.phase === "committing" && progress.index_total
+      ? Math.min(100, ((progress.indexed ?? 0) / progress.index_total) * 100)
+      : null,
+  );
   const pending = $derived(cov ? Math.max(0, cov.files - cov.done) : 0);
   const covPct = $derived(cov && cov.files > 0 ? Math.floor((cov.done / cov.files) * 100) : 0);
   /** Scanned, but enrichment has never run: the next step. */
@@ -153,10 +187,32 @@
   {#if progress && (scanning || progress.phase === "done" || progress.phase === "failed")}
     <div class="activity" class:failed={progress.phase === "failed"}>
       {#if progress.phase === "walking"}
-        <div class="line"><span class="spin"></span><span>Scanning · {count(progress.files)} files · {bytes(progress.bytes)} · {duration(progress.elapsed_ms)}</span></div>
+        <div class="line" title="Recording every file and folder on the drive">
+          <span class="spin"></span>
+          <span class="step">Scanning<span class="muted">{" · step 1 of 2"}</span></span>
+          {#if scanPct !== null}<span class="pct" title="An estimate, from the last scan or the space in use">~{Math.floor(scanPct)}%</span>{/if}
+        </div>
+        {#if scanPct !== null}
+          <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.floor(scanPct)}>
+            <div style="width: {scanPct}%"></div>
+          </div>
+        {/if}
+        <div class="line muted">{count(progress.files)} files · {bytes(progress.bytes)} · {duration(progress.elapsed_ms)}</div>
         <div class="muted cur" title={progress.current}>&lrm;{progress.current || "…"}&lrm;</div>
       {:else if progress.phase === "committing"}
-        <div class="line"><span class="spin"></span><span>Writing index…</span></div>
+        <div class="line" title="Making the new files searchable">
+          <span class="spin"></span>
+          <span class="step">Indexing for search<span class="muted">{" · step 2 of 2"}</span></span>
+          {#if indexPct !== null}<span class="pct">{Math.floor(indexPct)}%</span>{/if}
+        </div>
+        {#if indexPct !== null}
+          <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.floor(indexPct)}>
+            <div style="width: {indexPct}%"></div>
+          </div>
+          <div class="line muted">{count(progress.indexed ?? 0)} of {count(progress.index_total ?? 0)} files and folders</div>
+        {:else}
+          <div class="line muted">Saving {count(progress.files)} files…</div>
+        {/if}
       {:else if progress.phase === "done"}
         <div class="line">Scanned · {count(progress.files)} files in {duration(progress.elapsed_ms)}</div>
       {:else if progress.phase === "failed"}

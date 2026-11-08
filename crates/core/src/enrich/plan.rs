@@ -237,7 +237,9 @@ pub(super) fn build(
     ffmpeg: bool,
     bulk: &HashSet<i64>,
 ) -> Result<(Vec<Job>, Vec<Settled>)> {
-    use crate::db::volume::{ENRICH_DETAIL_PENDING, ENRICH_DONE, STAGE_SKIPPED_PLACEHOLDER};
+    use crate::db::volume::{
+        ENRICH_ART_PENDING, ENRICH_DETAIL_PENDING, ENRICH_DONE, STAGE_SKIPPED_PLACEHOLDER,
+    };
     let mut jobs = Vec::new();
     let mut settled = Vec::new();
     db.plan_rows(|r: PlanRow| {
@@ -250,7 +252,20 @@ pub(super) fn build(
         };
         let work = work_for(&facts, opts, ffmpeg);
         let pending_detail = r.done == ENRICH_DETAIL_PENDING;
-        if pass == 1 && !pending_detail {
+        if r.done == ENRICH_ART_PENDING {
+            // Enriched by an older version: everything but the artwork is already there.
+            if pass == 1 {
+                if work & W_THUMB != 0 {
+                    jobs.push(job(&r, W_THUMB, r.stages));
+                } else {
+                    settled.push(Settled {
+                        id: r.id,
+                        done: ENRICH_DONE,
+                        stages: 0,
+                    });
+                }
+            }
+        } else if pass == 1 && !pending_detail {
             if work & QUICK != 0 {
                 jobs.push(job(&r, work, 0));
             } else if work & DETAIL & !W_PROBE != 0 {

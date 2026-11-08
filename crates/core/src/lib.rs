@@ -85,6 +85,8 @@ mod tests {
             errors: 0,
             elapsed_ms: 0,
             current: String::new(),
+            indexed: 0,
+            index_total: 0,
         };
         assert_eq!(serde_json::to_value(&s).unwrap()["phase"], "walking");
     }

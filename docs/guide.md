@@ -29,6 +29,9 @@ files take about half a minute on an SSD. Nothing on the drive is changed.
   SDKs, repository copies in `.claude/worktrees`, `Windows`, `Program Files` and the
   like) are catalogued and hashed but not read for text or thumbnails. `.env` files are
   never read for text.
+- **Progress.** The drive card shows the scan's progress (an estimate, based on the
+  last scan or the space in use), then the indexing step, then enrichment. The free space
+  figure holds still until they finish.
 - **Plug it back in later** and the drive is rescanned silently. Its catalogue is also
   copied to `.storecat\catalog.db` on the drive itself, so another computer can import it.
   The drive Windows runs from is the exception: nothing is written to it.
@@ -46,7 +49,7 @@ Type in **Search**. Results come from every drive, connected or not, as you type
 
 | Filter | Example | Meaning |
 | --- | --- | --- |
-| `ext:` | `ext:pdf` | File extension |
+| `ext:` | `ext:pdf`, `ext:jpg,png`, `*.pdf` | File extension |
 | `kind:` | `kind:video` | video, image, audio, document, archive, code, disk_image, font, design |
 | `size:` | `size:>1gb`, `size:10mb..200mb` | File size |
 | `modified:` | `modified:2023`, `modified:2024-03`, `after:7d` | Modification date |
@@ -62,6 +65,11 @@ Files operating systems leave on drives are hidden from search: macOS's `._name`
 companions and `.DS_Store`, Windows' `Thumbs.db` and `desktop.ini`. They stay in the
 catalogue; `is:leftover` lists them. When a drive has a pile of them, Storage suggests a
 job that sends them to the Recycle Bin (`desktop.ini` excepted: Windows uses it).
+
+Click **Name**, **Size** or **Modified** above the results to sort by it, and again to
+reverse. Typing words switches back to best match first. Choose a type such as **Audio**
+and the extensions on your drives appear as chips underneath (MP3, FLAC, M4A...), with
+how many files each has; tick one or more to narrow the results.
 
 Press **Enter** to open a file, or reveal it in Explorer, when its drive is connected.
 When it isn't, the detail pane tells you which drive to fetch and where you said it lives.
@@ -115,7 +123,8 @@ loses at most the file in flight; **Resume** picks up from there.
 click a column heading to sort by name, copies, size or reclaimable space. Open a group,
 pick the copy to keep (Storecat suggests one outside Temp and Downloads, without "(1)" or
 "- Copy" in its name), and **Recycle other copies**. Tick several groups to clean
-them up in one job. Each copy is compared byte for byte with the one you keep just before
+them up in one job. Narrow the list by name or folder, file type or drive, or tick
+**Ready to clean** to see only groups that can be cleaned up right now. Each copy is compared byte for byte with the one you keep just before
 it goes to the Recycle Bin, and left alone if it differs.
 
 Copies inside folders an app manages (package caches, build output, `AppData`, folders

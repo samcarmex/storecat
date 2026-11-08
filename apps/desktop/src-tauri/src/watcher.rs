@@ -91,6 +91,9 @@ fn maybe_rescan(app: &AppHandle, catalog: &Arc<Catalog>, identity: &str) {
         log::info!("volume \"{}\" reconnected, rescanning", v.label);
         crate::commands::spawn_scan(app.clone(), Arc::clone(catalog), v.id);
     } else if catalog.setting_enabled(settings::AUTO_ENRICH, true) {
+        if let Err(e) = catalog.upgrade_enrichment(v.id) {
+            log::warn!("could not check \"{}\" for skipped artwork: {e}", v.label);
+        }
         if let Ok(c) = catalog.enrich_coverage(v.id) {
             if c.done < c.files {
                 crate::commands::spawn_enrich(app.clone(), Arc::clone(catalog), v.id);
@@ -115,6 +118,14 @@ fn resume_interrupted(app: &AppHandle, catalog: &Arc<Catalog>) {
         }
         if !auto_enrich || v.last_scan_at.is_none() {
             continue;
+        }
+        match catalog.upgrade_enrichment(v.id) {
+            Ok(n) if n > 0 => log::info!(
+                "\"{}\": {n} files get the artwork older versions skipped",
+                v.label
+            ),
+            Err(e) => log::warn!("could not check \"{}\" for skipped artwork: {e}", v.label),
+            _ => {}
         }
         if let Ok(c) = catalog.enrich_coverage(v.id) {
             if c.done < c.files {

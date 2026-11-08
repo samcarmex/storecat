@@ -69,7 +69,26 @@ pub fn parse_at(input: &str, now: i64) -> ParsedQuery {
     let mut q = ParsedQuery::default();
     let mut text_parts: Vec<String> = Vec::new();
 
-    for tok in tokenize(input) {
+    let mut tokens = tokenize(input).into_iter().peekable();
+    while let Some(tok) = tokens.next() {
+        // "ext: mp3" (a space after the colon) means "ext:mp3".
+        let tok = match tok {
+            Token::Word(w)
+                if w.len() > 1
+                    && w.ends_with(':')
+                    && w[..w.len() - 1].chars().all(|c| c.is_ascii_alphabetic()) =>
+            {
+                match tokens.peek() {
+                    Some(Token::Word(next)) => {
+                        let merged = format!("{w}{next}");
+                        tokens.next();
+                        Token::Word(merged)
+                    }
+                    _ => Token::Word(w),
+                }
+            }
+            t => t,
+        };
         match tok {
             Token::Phrase(p) => {
                 let p = p.trim().to_lowercase();
@@ -83,6 +102,12 @@ pub fn parse_at(input: &str, now: i64) -> ParsedQuery {
                     if apply_filter(&mut q, key, value, now) {
                         continue;
                     }
+                }
+                // "*.mp3", or ".mp3" for a known file type, is an extension filter. (".env"
+                // stays a name search: it is a whole file name, not a type.)
+                if let Some(ext) = bare_extension(&w) {
+                    q.exts.push(ext);
+                    continue;
                 }
                 let lw = w.to_lowercase();
                 // Split on characters the word tokenizer splits on, so "a_b" matches "a" and "b".
@@ -154,6 +179,18 @@ fn tokenize(input: &str) -> Vec<Token> {
     out
 }
 
+fn bare_extension(w: &str) -> Option<String> {
+    let (star, rest) = match w.strip_prefix("*.") {
+        Some(r) => (true, r),
+        None => (false, w.strip_prefix('.')?),
+    };
+    let ext = rest.to_ascii_lowercase();
+    if ext.is_empty() || ext.len() > 12 || !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    (star || crate::kind::kind_for_ext(&ext) != Kind::Other).then_some(ext)
+}
+
 fn split_filter(w: &str) -> Option<(&str, &str)> {
     let i = w.find(':')?;
     let key = &w[..i];
@@ -181,8 +218,16 @@ fn apply_filter(q: &mut ParsedQuery, key: &str, value: &str, now: i64) -> bool {
         "kind" | "type" => {
             let mut any = false;
             for k in v.split(',') {
-                if let Some(kind) = Kind::parse(&k.trim().to_ascii_lowercase()) {
+                let k = k.trim().trim_start_matches('.').to_ascii_lowercase();
+                if let Some(kind) = Kind::parse(&k) {
                     q.kinds.push(kind);
+                    any = true;
+                } else if key == "type"
+                    && !k.is_empty()
+                    && k.chars().all(|c| c.is_ascii_alphanumeric())
+                {
+                    // "type:mp3" means the file type, not a kind.
+                    q.exts.push(k);
                     any = true;
                 }
             }
@@ -512,5 +557,23 @@ mod tests {
         assert!(q.terms.contains(&"foo".to_string()));
         assert!(q.terms.contains(&"bar".to_string()));
         assert!(q.terms.contains(&"http".to_string()));
+    }
+
+    #[test]
+    fn extension_spellings() {
+        for input in [
+            "ext:mp3", "ext: mp3", "ext:.mp3", "*.mp3", ".mp3", "type:mp3", "EXT:MP3",
+        ] {
+            let q = parse_at(input, 0);
+            assert_eq!(q.exts, vec!["mp3".to_string()], "{input}");
+            assert!(q.terms.is_empty(), "{input}");
+        }
+        let q = parse_at(".env", 0);
+        assert!(q.exts.is_empty());
+        assert_eq!(q.terms, vec!["env".to_string()]);
+        let q = parse_at("song ext: flac", 0);
+        assert_eq!(q.exts, vec!["flac".to_string()]);
+        assert_eq!(q.terms, vec!["song".to_string()]);
+        assert_eq!(parse_at("type:video", 0).kinds, vec![Kind::Video]);
     }
 }

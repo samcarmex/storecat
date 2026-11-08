@@ -195,6 +195,24 @@ impl Catalog {
         self.volume_db(id)?.coverage()
     }
 
+    /// Queue what an older version of Storecat skipped (embedded artwork) so the next
+    /// enrichment fills it in. Cheap once done: a single info lookup. Returns the number
+    /// of files queued.
+    pub fn upgrade_enrichment(&self, id: VolumeId) -> Result<usize> {
+        if self.is_scanning(id) || !self.dirs.volume_db(id).exists() {
+            return Ok(0);
+        }
+        if self
+            .enriching
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&id)
+        {
+            return Ok(0);
+        }
+        VolumeDb::open_rw(&self.dirs.volume_db(id))?.upgrade_enrichment()
+    }
+
     /// Enrich every file of a volume that has not been processed yet. Blocking: run on a
     /// worker thread. Stops cleanly (and resumes next time) if the drive disappears or
     /// `cancel_enrich` is called.
@@ -274,6 +292,13 @@ impl Catalog {
         }
         self.repair_index(id)?;
         let writer = VolumeDb::open_rw(&db_path)?;
+        let upgraded = writer.upgrade_enrichment()?;
+        if upgraded > 0 {
+            log::info!(
+                "{}: {upgraded} files get the artwork older versions skipped",
+                volume.label
+            );
+        }
         mark_index_synced(&writer)?;
         let thumbs = ThumbDb::create(&self.dirs.thumbs_db(id))?;
         let ffmpeg = find_ffmpeg(&self.dirs);
@@ -575,8 +600,15 @@ impl PassRun<'_> {
                         break;
                     }
                     let Some(file) = db.file(j.id)? else { continue };
-                    let prior_meta = if pass == 2 && j.stages & STAGE_META != 0 {
+                    // Detail-pass jobs, and artwork-only jobs for files enriched by an older
+                    // version, keep what was found before in the search index.
+                    let prior_meta = if j.stages & STAGE_META != 0 {
                         db.meta_json(j.id)?
+                    } else {
+                        None
+                    };
+                    let prior_text = if pass == 1 && j.stages & STAGE_TEXT != 0 {
+                        db.text(j.id)?
                     } else {
                         None
                     };
@@ -587,6 +619,7 @@ impl PassRun<'_> {
                         pass,
                         prior_stages: j.stages,
                         prior_meta,
+                        prior_text,
                     };
                     seq += 1;
                     if job_tx.send(item).is_err() {
@@ -741,7 +774,7 @@ impl PassRun<'_> {
                 self.id,
                 &out.file,
                 out.meta_json.as_deref(),
-                r.text.as_deref(),
+                r.text.as_deref().or(out.prior_text.as_deref()),
                 stages,
                 &entries,
                 tags,

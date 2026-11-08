@@ -719,6 +719,74 @@ impl VolumeDb {
         Ok(())
     }
 
+    /// Files per (kind, extension), leaving out macOS `._` companions. Cached in `info`
+    /// until the catalogue changes (a rescan writes a fresh one).
+    pub fn extension_counts(&self) -> Result<Vec<(u8, String, u64)>> {
+        let stamp = self.info("scanned_at")?.unwrap_or_default();
+        if let (Some(at), Some(json)) = (self.info("exts_at")?, self.info("exts")?) {
+            if at == stamp {
+                if let Ok(v) = serde_json::from_str(&json) {
+                    return Ok(v);
+                }
+            }
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT kind, ext, COUNT(*) FROM files
+             WHERE ext != '' AND substr(name, 1, 2) != '._'
+             GROUP BY kind, ext",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as u8,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)? as u64,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // Read-only connections can't cache; that only costs the query next time.
+        if let Ok(json) = serde_json::to_string(&rows) {
+            let _ = self.set_info("exts", &json);
+            let _ = self.set_info("exts_at", &stamp);
+        }
+        Ok(rows)
+    }
+
+    /// Bring enrichment from an older format up to date without redoing it: files whose
+    /// format carries artwork (album art, document previews) but that have no thumbnail
+    /// are queued for the thumbnail alone. Returns how many were queued.
+    pub fn upgrade_enrichment(&self) -> Result<usize> {
+        let format = self
+            .info(ENRICH_FORMAT_KEY)?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1);
+        if format >= ENRICH_FORMAT {
+            return Ok(0);
+        }
+        let exts: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT f.ext FROM files f JOIN enrich e ON e.file_id = f.id
+                 WHERE e.done = 1 AND (e.stages & ?1) = 0",
+            )?;
+            let all = stmt
+                .query_map([STAGE_THUMB as i64], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            all.into_iter()
+                .filter(|e| storecat_extract::covers::has_embedded_art(e))
+                .collect()
+        };
+        let mut queued = 0;
+        for ext in &exts {
+            queued += self.conn.execute(
+                "UPDATE enrich SET done = ?1 WHERE done = 1 AND (stages & ?2) = 0
+                 AND file_id IN (SELECT id FROM files WHERE ext = ?3)",
+                params![ENRICH_ART_PENDING as i64, STAGE_THUMB as i64, ext],
+            )?;
+        }
+        self.set_info(ENRICH_FORMAT_KEY, &ENRICH_FORMAT.to_string())?;
+        Ok(queued)
+    }
+
     /// Forget enrichment so the runner redoes it (e.g. after FFmpeg was installed).
     pub fn reset_enrichment(&self, keep_hashes: bool) -> Result<()> {
         self.conn.execute_batch(
@@ -824,6 +892,13 @@ impl VolumeDb {
 pub const ENRICH_DONE: u8 = 1;
 /// `enrich.done`: first pass finished, text or video thumbnails still to do.
 pub const ENRICH_DETAIL_PENDING: u8 = 2;
+/// `enrich.done`: enriched before Storecat read embedded artwork; only the thumbnail is
+/// still to do.
+pub const ENRICH_ART_PENDING: u8 = 3;
+/// What enrichment produces. Catalogues enriched by an older format get the new parts
+/// filled in (see `Catalog::upgrade_enrichment`).
+pub const ENRICH_FORMAT: u32 = 2;
+const ENRICH_FORMAT_KEY: &str = "enrich_format";
 
 // Stage bits recorded in `enrich.stages`.
 pub const STAGE_HASH: u32 = 1;

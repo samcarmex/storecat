@@ -218,6 +218,16 @@
     return () => un.forEach((u) => u());
   });
 
+  /** What a finished job achieved, in one line. */
+  function outcome(j: Job): string {
+    const files = `${count(j.files_done)} ${j.files_done === 1 ? "file" : "files"}`;
+    if (j.status === "cancelled") return `Cancelled after ${count(j.files_done)} of ${count(j.files_total)} files`;
+    if (j.status === "failed") return `${count(j.files_done)} of ${count(j.files_total)} files done · ${count(j.files_failed)} failed`;
+    if (j.kind === "delete") return `${bytes(j.bytes_done)} freed · ${files} recycled`;
+    if (j.kind === "move") return `${bytes(j.bytes_done)} moved · ${files}${j.verify ? ", each verified" : ""}`;
+    return `${bytes(j.bytes_done)} copied · ${files}${j.verify ? ", each verified" : ""}`;
+  }
+
   const STATUS_LABEL: Record<string, string> = {
     planned: "Ready", running: "Running", paused: "Paused", done: "Done", failed: "Finished with errors", cancelled: "Cancelled",
   };
@@ -349,12 +359,20 @@
         {@const filesDone = live ? p.files_done : j.files_done}
         {@const bytesDone = live ? p.bytes_done : j.bytes_done}
         {@const pct = j.bytes_total > 0 ? Math.min(100, (bytesDone / j.bytes_total) * 100) : (j.files_total ? (filesDone / j.files_total) * 100 : 0)}
-        <article class="card job" class:failed={j.status === "failed"}>
+        {@const finished = !live && (j.status === "done" || j.status === "failed" || j.status === "cancelled")}
+        <article class="card job" class:failed={j.status === "failed"} class:complete={finished && j.status === "done"}>
           <header>
             <span class="kind">{j.kind}</span>
             <span class="name">{j.name}</span>
             <span class="status muted">{live ? "Running" : STATUS_LABEL[j.status] ?? j.status}{j.status !== "running" && j.finished_at ? ` · ${ago(j.finished_at)}` : ""}</span>
           </header>
+          {#if finished}
+            <div class="outcome" class:ok={j.status === "done"} class:bad={j.status === "failed"}>
+              <span class="mark" aria-hidden="true">{j.status === "done" ? "✓" : j.status === "failed" ? "!" : "–"}</span>
+              <span>{outcome(j)}</span>
+            </div>
+            {#if j.files_skipped}<div class="muted line">{count(j.files_skipped)} skipped</div>{/if}
+          {:else}
           <div class="bar"><div style="width: {pct}%"></div></div>
           <div class="muted line">
             {count(filesDone)} / {count(j.files_total)} files · {bytes(bytesDone)} of {bytes(j.bytes_total)}
@@ -363,6 +381,7 @@
             {#if j.files_skipped}· {j.files_skipped} skipped{/if}
             {#if live && p.current}· <span class="cur">{p.current}</span>{/if}
           </div>
+          {/if}
           {#if j.dest_root}<div class="muted mono small">→ {j.dest_root}</div>{/if}
           {#if j.error && !live}<div class="error small">{j.error}</div>{/if}
           <footer>
@@ -411,8 +430,8 @@
   .layout { display: grid; grid-template-columns: minmax(380px, 520px) minmax(0, 1fr); gap: var(--gap); align-items: start; }
   @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } }
   .form { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
-  .seg { display: inline-flex; padding: 4px; border-radius: var(--radius-pill); background: rgba(255,255,255,.05); gap: 4px; }
-  .seg button { border: 0; background: transparent; color: var(--fg-soft); border-radius: var(--radius-pill); padding: 8px 14px; font-size: 13px; font-weight: 600; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+  .seg { display: flex; width: 100%; padding: 4px; border-radius: 14px; background: rgba(255,255,255,.05); gap: 4px; }
+  .seg button { flex: 1; border: 0; background: transparent; color: var(--fg-soft); border-radius: 10px; padding: 10px 16px; font-size: 14px; font-weight: 600; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; text-align: left; }
   .seg button .muted { font-weight: 400; font-size: 11px; }
   .seg button.on { background: var(--accent); color: var(--on-accent); }
   .seg button.on .muted { color: var(--on-accent); opacity: .75; }
@@ -445,6 +464,11 @@
   .job header { display: flex; gap: 10px; align-items: baseline; }
   .kind { font-family: var(--font-display); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--teal); }
   .name { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job.complete { border-color: rgba(80, 200, 120, .28); }
+  .outcome { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; }
+  .outcome .mark { width: 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 13px; background: rgba(255,255,255,.08); color: var(--fg-soft); }
+  .outcome.ok .mark { background: rgba(80, 200, 120, .18); color: #5fd38d; }
+  .outcome.bad .mark { background: rgba(255, 92, 92, .18); color: #ff7a7a; }
   .bar { height: 8px; border-radius: 4px; background: rgba(255,255,255,.08); overflow: hidden; }
   .bar div { height: 100%; background: var(--accent); border-radius: 4px; transition: width .3s; }
   .line { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

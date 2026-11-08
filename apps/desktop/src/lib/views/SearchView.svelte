@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ops, type Kind, type SavedSearch, type SearchHit, type SortBy } from "../api";
+  import { api, ops, type ExtCount, type Kind, type SavedSearch, type SearchHit, type SortBy } from "../api";
   import type { AppStore } from "../store.svelte";
   import { count, bytes } from "../format";
   import EmptyState from "../components/EmptyState.svelte";
@@ -41,6 +41,7 @@
     if (handoff !== null) {
       query = handoff;
       kind = "all";
+      exts = [];
       handoff = null;
       input?.focus();
     }
@@ -61,6 +62,11 @@
   let query = $state("");
   let kind = $state<Kind | "all">("all");
   let sort = $state<SortBy>("relevance");
+  /** The order the results actually came back in. */
+  let shownSort = $state<SortBy>("relevance");
+  /** Extension chips for the chosen kind, and the ones switched on. */
+  let extOptions = $state<ExtCount[]>([]);
+  let exts = $state<string[]>([]);
   let input: HTMLInputElement | undefined = $state();
   let list: VirtualList<SearchHit> | undefined = $state();
 
@@ -73,7 +79,50 @@
   let seq = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
-  const effectiveQuery = $derived(kind === "all" ? query : `${query} kind:${kind}`.trim());
+  const effectiveQuery = $derived(
+    [query, kind === "all" ? "" : `kind:${kind}`, exts.length ? `ext:${exts.join(",")}` : ""]
+      .filter((p) => p.trim())
+      .join(" "),
+  );
+
+  function chooseKind(k: Kind | "all") {
+    if (kind === k) return;
+    kind = k;
+    exts = [];
+  }
+
+  $effect(() => {
+    const k = kind;
+    void store.catalogVersion;
+    if (k === "all" || k === "dir") {
+      extOptions = [];
+      return;
+    }
+    void api.extensionCounts(k).then((r) => {
+      if (kind === k) extOptions = r;
+    });
+  });
+
+  function toggleExt(e: string) {
+    exts = exts.includes(e) ? exts.filter((x) => x !== e) : [...exts, e];
+  }
+
+  /** Column headings: first click sorts the natural way, the next reverses it. */
+  const COLUMNS: { label: string; first?: SortBy; second?: SortBy }[] = [
+    { label: "Name", first: "name_asc", second: "name_desc" },
+    { label: "Drive" },
+    { label: "Size", first: "size_desc", second: "size_asc" },
+    { label: "Modified", first: "modified_desc", second: "modified_asc" },
+  ];
+  function sortBy(c: (typeof COLUMNS)[number]) {
+    if (!c.first || !c.second) return;
+    sort = shownSort === c.first ? c.second : c.first;
+  }
+  function arrow(c: (typeof COLUMNS)[number]): string {
+    if (shownSort === c.first) return c.first.endsWith("asc") ? "↑" : "↓";
+    if (shownSort === c.second) return c.second!.endsWith("asc") ? "↑" : "↓";
+    return "";
+  }
   const selected = $derived(selectedIndex >= 0 ? (hits[selectedIndex] ?? null) : null);
   const hasQuery = $derived(effectiveQuery.trim().length > 0);
 
@@ -104,6 +153,7 @@
     total = r.total;
     elapsed = r.elapsed_ms;
     shownText = r.text;
+    shownSort = r.sort ?? s;
     selectedIndex = hits.length ? 0 : -1;
     list?.scrollToIndex(0);
   }
@@ -139,6 +189,7 @@
       openSelected();
     } else if (e.key === "Escape") {
       query = "";
+      exts = [];
     }
   }
 </script>
@@ -176,17 +227,12 @@
 
 <div class="filters">
   {#each KIND_CHIPS as c (c.id)}
-    <button class="chip" class:on={kind === c.id} onclick={() => (kind = c.id)}>{c.label}</button>
+    <button class="chip" class:on={kind === c.id} onclick={() => chooseKind(c.id)}>{c.label}</button>
   {/each}
-  <span class="sep"></span>
-  <label class="chip sortsel">
-    <span class="muted">Sort</span>
-    <select bind:value={sort}>
-      <option value="relevance">Best match</option>
-      <option value="modified_desc">Newest</option>
-      <option value="size_desc">Largest</option>
-    </select>
-  </label>
+  {#if sort !== "relevance" && query.trim()}
+    <span class="sep"></span>
+    <button class="chip" onclick={() => (sort = "relevance")} title="Order by how well each result matches your words">Best match</button>
+  {/if}
   {#if hasQuery}
     {#if savingName === null}
       <button class="chip star" onclick={() => (savingName = "")} title="Save this search">★ Save</button>
@@ -198,10 +244,34 @@
       </form>
     {/if}
     <span class="muted status">
-      {count(total)} {total === 1 ? "result" : "results"} in {elapsed.toFixed(1)} ms{store.stats.index_rebuilding ? " · index rebuilding" : ""}
+      {count(total)} {total === 1 ? "result" : "results"} in {elapsed.toFixed(1)} ms
     </span>
   {/if}
 </div>
+
+{#if store.stats.index_rebuilding}
+  {@const t = store.stats.index_rebuild_total ?? 0}
+  {@const pct = t > 0 ? Math.min(100, ((store.stats.index_rebuild_done ?? 0) / t) * 100) : 0}
+  <div class="rebuild" role="status">
+    <span class="spin"></span>
+    <span>Updating the search index{t > 0 ? ` · ${Math.floor(pct)}%` : "…"}</span>
+    <span class="muted">Results may be incomplete until it finishes.</span>
+    {#if t > 0}<div class="rbar"><div style="width: {pct}%"></div></div>{/if}
+  </div>
+{/if}
+
+{#if extOptions.length > 0}
+  <div class="filters exts" aria-label="File types">
+    {#each extOptions as e (e.ext)}
+      <button class="chip small" class:on={exts.includes(e.ext)} onclick={() => toggleExt(e.ext)} title={`${count(e.files)} .${e.ext} files`}>
+        {e.ext.toUpperCase()}<span class="n">{count(e.files)}</span>
+      </button>
+    {/each}
+    {#if exts.length}
+      <button class="chip small ghost" onclick={() => (exts = [])}>Clear</button>
+    {/if}
+  </div>
+{/if}
 
 {#if store.stats.volumes === 0}
   <EmptyState
@@ -232,7 +302,15 @@
   <div class="results">
     <section class="card list" aria-label="Results">
       <div class="head muted">
-        <span>Name</span><span>Drive</span><span>Size</span><span>Modified</span>
+        {#each COLUMNS as c (c.label)}
+          {#if c.first}
+            <button class="sort" class:active={!!arrow(c)} onclick={() => sortBy(c)} title={`Sort by ${c.label.toLowerCase()}`}>
+              {c.label}<span class="arrow">{arrow(c)}</span>
+            </button>
+          {:else}
+            <span>{c.label}</span>
+          {/if}
+        {/each}
       </div>
       <VirtualList bind:this={list} items={hits} rowHeight={56} onNearEnd={loadMore} class="vl">
         {#snippet row(hit, i)}
@@ -338,16 +416,80 @@
     color: var(--on-accent);
     font-weight: 600;
   }
-  .sortsel select {
-    background: transparent;
-    border: 0;
-    color: var(--fg);
-    font: inherit;
+  .rebuild {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    margin: 0 0 12px;
+    padding: 10px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
     font-size: 13px;
-    outline: 0;
   }
-  .sortsel select option {
-    background: var(--surface-2);
+  .rebuild .spin {
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--line);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  .rbar {
+    flex-basis: 100%;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--line);
+    overflow: hidden;
+  }
+  .rbar div {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.4s;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .exts {
+    margin-top: -4px;
+    gap: 6px;
+  }
+  .chip.small {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+  .chip.small .n {
+    font-size: 11px;
+    opacity: 0.6;
+    font-weight: 400;
+  }
+  .chip.ghost {
+    border-color: transparent;
+  }
+  .sort {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    text-align: left;
+    padding: 0;
+    cursor: pointer;
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+  }
+  .sort:hover,
+  .sort.active {
+    color: var(--fg);
+  }
+  .arrow {
+    color: var(--accent);
   }
   .sep {
     width: 1px;

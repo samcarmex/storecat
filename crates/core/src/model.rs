@@ -364,6 +364,11 @@ pub struct ScanProgress {
     pub errors: u64,
     pub elapsed_ms: u64,
     pub current: String,
+    /// Committing: files brought into the search index so far, of `index_total`.
+    #[serde(default)]
+    pub indexed: u64,
+    #[serde(default)]
+    pub index_total: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -400,10 +405,15 @@ pub struct SearchHit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SortBy {
+    /// Best match first. A query with no words to rank by is listed by name instead.
     #[default]
     Relevance,
     ModifiedDesc,
+    ModifiedAsc,
     SizeDesc,
+    SizeAsc,
+    NameAsc,
+    NameDesc,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,6 +443,9 @@ pub struct SearchResponse {
     pub elapsed_ms: f64,
     /// The query with filters stripped, for the UI's "no results for …" line.
     pub text: String,
+    /// The order the hits are in (a filter-only "best match" query comes back by name).
+    #[serde(default)]
+    pub sort: SortBy,
 }
 
 /// Everything the detail pane shows for one item.
@@ -622,6 +635,13 @@ pub struct DupSummary {
     pub waste: u64,
 }
 
+/// How many catalogued files have an extension (for the search filter chips).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtCount {
+    pub ext: String,
+    pub files: u64,
+}
+
 /// Which duplicate groups to list.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -643,7 +663,7 @@ pub enum DupSort {
     Name,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DupQuery {
     #[serde(default)]
     pub scope: DupScope,
@@ -654,6 +674,60 @@ pub struct DupQuery {
     pub limit: usize,
     #[serde(default)]
     pub offset: usize,
+    /// Words that must appear in the file name or one of its folders.
+    #[serde(default)]
+    pub text: String,
+    /// Only these kinds (empty: all).
+    #[serde(default)]
+    pub kinds: Vec<Kind>,
+    /// Only groups with a copy on this drive.
+    #[serde(default)]
+    pub volume_id: Option<VolumeId>,
+    /// Only groups that can be cleaned up now: the copy to keep and at least one copy to
+    /// remove are on connected drives.
+    #[serde(default)]
+    pub ready_only: bool,
+}
+
+impl DupQuery {
+    /// Whether a group passes the filters (the scope is applied separately).
+    pub fn keeps(&self, g: &DupGroup) -> bool {
+        if !self.kinds.is_empty() && !self.kinds.contains(&g.kind) {
+            return false;
+        }
+        if let Some(vid) = self.volume_id {
+            if !g.members.iter().any(|m| m.volume_id == vid) {
+                return false;
+            }
+        }
+        if self.ready_only {
+            let Some(keep) = g.suggested_keep else {
+                return false;
+            };
+            let keeper_online = g
+                .members
+                .iter()
+                .any(|m| (m.volume_id, m.file_id) == keep && m.volume_online);
+            let removable = g
+                .members
+                .iter()
+                .any(|m| (m.volume_id, m.file_id) != keep && !m.app_managed && m.volume_online);
+            if !keeper_online || !removable {
+                return false;
+            }
+        }
+        let words: Vec<String> = self
+            .text
+            .split_whitespace()
+            .map(|w| w.to_lowercase())
+            .collect();
+        words.iter().all(|w| {
+            g.members.iter().any(|m| {
+                m.name.to_lowercase().contains(w.as_str())
+                    || m.path.to_lowercase().contains(w.as_str())
+            })
+        })
+    }
 }
 
 fn yes() -> bool {
@@ -697,6 +771,11 @@ pub struct DownloadProgress {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CatalogStats {
     pub index_rebuilding: bool,
+    /// While the index rebuilds: items indexed so far, of about `index_rebuild_total`.
+    #[serde(default)]
+    pub index_rebuild_done: u64,
+    #[serde(default)]
+    pub index_rebuild_total: u64,
     pub volumes: u64,
     pub online: u64,
     pub files: u64,

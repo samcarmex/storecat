@@ -955,6 +955,7 @@ mod tests {
             desc: true,
             limit: 10,
             offset: 0,
+            ..Default::default()
         };
         let mine = cat.duplicate_page(&q(DupScope::Mine)).unwrap();
         assert_eq!(mine.groups.len(), 1);
@@ -977,6 +978,43 @@ mod tests {
         assert_eq!(
             cat.duplicate_page(&q(DupScope::All)).unwrap().summary.files,
             4
+        );
+        let filtered = |f: DupQuery| cat.duplicate_page(&f).unwrap().groups.len();
+        let mine = || q(DupScope::Mine);
+        assert_eq!(
+            filtered(DupQuery {
+                text: "wetransfer".into(),
+                ..mine()
+            }),
+            1
+        );
+        assert_eq!(
+            filtered(DupQuery {
+                text: "invoice".into(),
+                ..mine()
+            }),
+            0
+        );
+        assert_eq!(
+            filtered(DupQuery {
+                kinds: vec![Kind::Video],
+                ..mine()
+            }),
+            0
+        );
+        assert_eq!(
+            filtered(DupQuery {
+                ready_only: true,
+                ..mine()
+            }),
+            1
+        );
+        assert_eq!(
+            filtered(DupQuery {
+                volume_id: Some(v.id),
+                ..mine()
+            }),
+            1
         );
 
         let spec = cat

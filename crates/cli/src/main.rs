@@ -434,6 +434,7 @@ fn cmd_dupes(args: &[String]) -> anyhow::Result<()> {
         desc: true,
         limit: 50,
         offset: 0,
+        ..Default::default()
     })?;
     let summary = page.summary;
     println!(

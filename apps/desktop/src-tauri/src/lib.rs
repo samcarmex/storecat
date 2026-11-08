@@ -148,6 +148,7 @@ pub fn run() {
             commands::enrich_coverage,
             commands::reset_enrichment,
             commands::duplicates,
+            commands::extension_counts,
             commands::duplicate_summary,
             commands::verify_group,
             commands::ffmpeg_status,

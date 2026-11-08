@@ -56,8 +56,8 @@ The feature-complete build for 1.0, for testing on real drive collections.
 - The preview Word, Excel and PowerPoint save in their files, LibreOffice documents'
   thumbnails, e-book covers (EPUB), Photoshop thumbnails, and the previews in Krita,
   Sketch, Procreate, Keynote/Pages/Numbers and 3MF files.
-- Drives enriched earlier get these with "Redo enrichment" in the drive's menu (hashes
-  are kept).
+- Drives enriched by an earlier version pick up the artwork they skipped by themselves:
+  only those files are read again, and their hashes, details and document text are kept.
 
 **Closing, resuming and progress**
 - Closing the window now quits Storecat (unless "keep running in the tray" is on). It
@@ -74,10 +74,29 @@ The feature-complete build for 1.0, for testing on real drive collections.
 - The Storage view's content bar ends with free space, and shows space the scan did not
   catalogue (system folders) separately. Its "Disk image" slice is now "Disk images &
   VMs": on a PC that is mostly WSL, Docker and virtual machine disks.
+- Scanning shows an estimated percentage (against the last scan, or the space in use on
+  a first scan), and the indexing step that follows shows its own bar instead of
+  "Writing index…".
+- A drive's free space holds still while it is scanned or enriched. The catalogue may
+  live on that drive, and its database and index grow and shrink as they are written.
+- The one-time search index rebuild after an update shows its progress above the results.
+- Starting Storecat straight after quitting it no longer fails while the old instance
+  finishes closing.
+- Finished jobs show what they did ("1.5 GB freed · 12 files recycled", "4 GB copied")
+  instead of a full progress bar. The Copy and Move choice spans the form.
 - Sharper installer artwork on high-DPI displays.
+
+**Search**
+- Click the Name, Size or Modified heading to sort; click again to reverse. Typing words
+  returns to best match first; filter-only searches such as `ext:mp3` list by name.
+- Choosing Audio, Video, Images, Documents, Design or Archives shows the extensions
+  you actually have as chips, with counts. Tick one or several to narrow the list.
+- `ext: mp3`, `ext:.mp3`, `*.mp3`, `.mp3` and `type:mp3` all mean the same as `ext:mp3`.
 
 **Duplicates you can act on**
 - Columns sort by clicking their heading; the default is largest reclaimable space first.
+- Filters: a name or folder search, file type, a drive, and "Ready to clean" for groups
+  whose copy to keep and an extra copy are both connected. The totals follow the filters.
 - Every group offers the copy to keep (outside Temp and Downloads, not a "(1)" copy) and
   **Recycle other copies**, without verifying first: each copy is compared byte for
   byte with the kept one just before it is recycled, and left alone if it differs. Tick

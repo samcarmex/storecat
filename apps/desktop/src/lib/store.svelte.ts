@@ -33,6 +33,7 @@ export class AppStore {
   readonly online = $derived(this.volumes.filter((v) => v.online).length);
 
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private rebuildTimer: ReturnType<typeof setTimeout> | null = null;
   private bumpTimer: ReturnType<typeof setTimeout> | null = null;
 
   async init() {
@@ -67,6 +68,7 @@ export class AppStore {
       this.volumes = volumes;
       this.detected = detected;
       this.stats = stats;
+      this.watchRebuild();
       for (const id of scanning) {
         if (!this.progress[id]) {
           this.progress[id] = {
@@ -90,6 +92,23 @@ export class AppStore {
     } catch (e) {
       this.error = String(e);
     }
+  }
+
+  /** While the search index rebuilds in the background, poll its progress until it's done. */
+  private watchRebuild() {
+    if (!this.stats.index_rebuilding || this.rebuildTimer) return;
+    this.rebuildTimer = setTimeout(async () => {
+      this.rebuildTimer = null;
+      try {
+        const s = await api.catalogStats();
+        const finished = this.stats.index_rebuilding && !s.index_rebuilding;
+        this.stats = s;
+        if (finished) this.catalogVersion += 1;
+      } catch {
+        // try again on the next refresh
+      }
+      this.watchRebuild();
+    }, 1500);
   }
 
   private onScan(p: ScanProgress) {

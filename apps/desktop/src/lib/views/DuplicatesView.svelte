@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ops, type DupGroup, type DupMember, type DupPick, type DupScope, type DupSort, type DupSummary } from "../api";
+  import { api, ops, type Kind, type DupGroup, type DupMember, type DupPick, type DupScope, type DupSort, type DupSummary } from "../api";
   import type { AppStore } from "../store.svelte";
   import type { ViewId } from "../nav";
   import { bytes, count, date, displayPath, KIND_TILE } from "../format";
@@ -18,6 +18,38 @@
   let sort = $state<DupSort>("waste");
   let desc = $state(true);
 
+  // Filters
+  const KINDS: { id: string; label: string; kinds: Kind[] }[] = [
+    { id: "all", label: "All", kinds: [] },
+    { id: "image", label: "Photos", kinds: ["image"] },
+    { id: "video", label: "Video", kinds: ["video"] },
+    { id: "audio", label: "Audio", kinds: ["audio"] },
+    { id: "document", label: "Documents", kinds: ["document"] },
+    { id: "archive", label: "Archives", kinds: ["archive", "disk_image"] },
+    { id: "other", label: "Other", kinds: ["design", "code", "font", "other"] },
+  ];
+  let textInput = $state("");
+  let text = $state("");
+  let kindId = $state("all");
+  let driveId = $state<number | null>(null);
+  let readyOnly = $state(false);
+  let textTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    const t = textInput;
+    if (textTimer) clearTimeout(textTimer);
+    textTimer = setTimeout(() => (text = t.trim()), 200);
+  });
+  const filtered = $derived(text !== "" || kindId !== "all" || driveId !== null || readyOnly);
+  function clearFilters() {
+    textInput = "";
+    text = "";
+    kindId = "all";
+    driveId = null;
+    readyOnly = false;
+  }
+  /** Drives that have hashed files, the only ones that can hold duplicates. */
+  const drives = $derived(store.volumes.filter((v) => (store.coverage[v.id]?.hashed ?? 0) > 0));
+
   let open = $state<Set<string>>(new Set());
   let verifying = $state<Set<string>>(new Set());
   /** Chosen copy to keep per group, "volume:file". */
@@ -34,7 +66,17 @@
   async function load(more = false) {
     loading = true;
     try {
-      const page = await api.duplicates({ scope, sort, desc, limit: PAGE, offset: more ? groups.length : 0 });
+      const page = await api.duplicates({
+        scope,
+        sort,
+        desc,
+        limit: PAGE,
+        offset: more ? groups.length : 0,
+        text,
+        kinds: KINDS.find((k) => k.id === kindId)?.kinds ?? [],
+        volume_id: driveId,
+        ready_only: readyOnly,
+      });
       groups = more ? [...groups, ...page.groups] : page.groups;
       summary = page.summary;
       error = null;
@@ -59,6 +101,10 @@
     void scope;
     void sort;
     void desc;
+    void text;
+    void kindId;
+    void driveId;
+    void readyOnly;
     void load();
   });
 
@@ -191,7 +237,7 @@
   <h1>Same file, <em>several shelves.</em></h1>
   <span class="muted">
     {#if summary.groups > 0}
-      {count(summary.groups)} groups · {count(summary.files)} files · {bytes(summary.waste)} reclaimable
+      {count(summary.groups)} {summary.groups === 1 ? "group" : "groups"} · {count(summary.files)} {summary.files === 1 ? "file" : "files"} · {bytes(summary.waste)} reclaimable
     {:else}
       Files over the size threshold that share a hash across your drives
     {/if}
@@ -219,6 +265,34 @@
   {/if}
 </div>
 
+{#if groups.length > 0 || filtered}
+<div class="filters" role="search" aria-label="Filter duplicates">
+  <label class="find">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></svg>
+    <input bind:value={textInput} placeholder="Filter by name or folder" aria-label="Filter by name or folder" spellcheck="false" />
+    {#if textInput}<button class="x" aria-label="Clear filter text" onclick={() => (textInput = "")}>×</button>{/if}
+  </label>
+  {#each KINDS as k (k.id)}
+    <button class="chip" class:on={kindId === k.id} onclick={() => (kindId = k.id)}>{k.label}</button>
+  {/each}
+  <span class="sep"></span>
+  {#if drives.length > 1}
+    <select class="chip drive" aria-label="Only groups with a copy on this drive" value={driveId ?? ""} onchange={(e) => { const v = (e.currentTarget as HTMLSelectElement).value; driveId = v === "" ? null : Number(v); }}>
+      <option value="">Any drive</option>
+      {#each drives as d (d.id)}
+        <option value={d.id}>{d.label}</option>
+      {/each}
+    </select>
+  {/if}
+  <button class="chip" class:on={readyOnly} aria-pressed={readyOnly} onclick={() => (readyOnly = !readyOnly)} title="Only groups whose copy to keep and at least one extra copy are on connected drives">
+    Ready to clean
+  </button>
+  {#if filtered}
+    <button class="chip ghost" onclick={clearFilters}>Clear filters</button>
+  {/if}
+</div>
+{/if}
+
 {#if notice}
   <div class="notice card">
     <span>{notice}</span>
@@ -231,7 +305,11 @@
   <div class="error card">{error}</div>
 {/if}
 
-{#if groups.length === 0 && !loading}
+{#if groups.length === 0 && !loading && filtered}
+  <EmptyState title="No groups match these filters" body="Try a different word, type or drive, or clear the filters to see every group.">
+    <button class="btn" onclick={clearFilters}>Clear filters</button>
+  </EmptyState>
+{:else if groups.length === 0 && !loading}
   <EmptyState
     title={!anyHashed ? "No hashes yet" : scope === "mine" ? "No duplicates among your files" : "No duplicates found"}
     body={!anyHashed
@@ -357,6 +435,84 @@
   }
   .spacer {
     flex: 1;
+  }
+  .filters {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 0 4px;
+  }
+  .find {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 30px;
+    padding: 0 10px;
+    min-width: 220px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-pill);
+    color: var(--fg-soft);
+  }
+  .find:focus-within {
+    border-color: var(--accent);
+  }
+  .find input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    font-size: 13px;
+    outline: 0;
+  }
+  .find .x {
+    border: 0;
+    background: transparent;
+    color: var(--fg-soft);
+    font-size: 16px;
+    line-height: 1;
+    padding: 0;
+  }
+  .chip {
+    height: 30px;
+    padding: 0 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-pill);
+    background: transparent;
+    color: var(--fg-soft);
+    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .chip:hover {
+    border-color: rgba(255, 255, 255, 0.35);
+    color: #fff;
+  }
+  .chip.on {
+    background: #fff;
+    border-color: #fff;
+    color: var(--on-accent);
+    font-weight: 600;
+  }
+  .chip.ghost {
+    border-color: transparent;
+  }
+  select.chip {
+    font: inherit;
+    font-size: 12px;
+    outline: 0;
+  }
+  select.chip option {
+    background: var(--surface-2);
+    color: var(--fg);
+  }
+  .sep {
+    width: 1px;
+    height: 18px;
+    background: var(--line-strong);
+    margin: 0 2px;
   }
   .seg {
     display: inline-flex;

@@ -33,6 +33,8 @@ pub struct Catalog {
     pub(crate) enriching: Mutex<HashMap<VolumeId, Arc<AtomicBool>>>,
     scan_gate: Mutex<()>,
     index_rebuilding: AtomicBool,
+    rebuild_done: std::sync::atomic::AtomicU64,
+    rebuild_total: std::sync::atomic::AtomicU64,
     upgraded: Mutex<HashSet<VolumeId>>,
     pub(crate) running_jobs: Mutex<HashMap<i64, Arc<AtomicBool>>>,
     pub(crate) cancelled_jobs: Mutex<HashSet<i64>>,
@@ -72,6 +74,8 @@ impl Catalog {
             enriching: Mutex::new(HashMap::new()),
             scan_gate: Mutex::new(()),
             index_rebuilding: AtomicBool::new(false),
+            rebuild_done: std::sync::atomic::AtomicU64::new(0),
+            rebuild_total: std::sync::atomic::AtomicU64::new(0),
             upgraded: Mutex::new(HashSet::new()),
             running_jobs: Mutex::new(HashMap::new()),
             cancelled_jobs: Mutex::new(HashSet::new()),
@@ -249,6 +253,8 @@ impl Catalog {
         let vols = self.volumes()?;
         let mut s = CatalogStats {
             index_rebuilding: self.index_rebuilding(),
+            index_rebuild_done: self.rebuild_done.load(Ordering::Relaxed),
+            index_rebuild_total: self.rebuild_total.load(Ordering::Relaxed),
             volumes: vols.len() as u64,
             ..Default::default()
         };
@@ -419,6 +425,8 @@ impl Catalog {
                 errors: stats.errors,
                 elapsed_ms: stats.elapsed_ms,
                 current: String::new(),
+                indexed: 0,
+                index_total: 0,
             }),
             Err(e) => progress(ScanProgress {
                 volume_id: id,
@@ -431,6 +439,8 @@ impl Catalog {
                 errors: 0,
                 elapsed_ms: 0,
                 current: String::new(),
+                indexed: 0,
+                index_total: 0,
             }),
         }
         result
@@ -496,6 +506,8 @@ impl Catalog {
                             errors: sink_counters.errors.load(Ordering::Relaxed),
                             elapsed_ms: started.elapsed().as_millis() as u64,
                             current: sink_counters.current(),
+                            indexed: 0,
+                            index_total: 0,
                         });
                     }
                 }
@@ -518,6 +530,8 @@ impl Catalog {
                 errors: counters.errors.load(Ordering::Relaxed),
                 elapsed_ms: walk_ms,
                 current: String::new(),
+                indexed: 0,
+                index_total: 0,
             });
             writer.finish()?;
 
@@ -528,7 +542,25 @@ impl Catalog {
                 let db = VolumeDb::open_rw(&tmp_path)?;
                 carried = db.carry_over(&live_path, Some(&thumbs_live), Some(&thumbs_tmp))?;
                 if carried > 0 {
-                    for fid in db.enriched_file_ids()? {
+                    let ids = db.enriched_file_ids()?;
+                    let index_total = ids.len() as u64;
+                    let mut last_report = Instant::now();
+                    for (n, fid) in ids.into_iter().enumerate() {
+                        if last_report.elapsed() >= std::time::Duration::from_millis(250) {
+                            last_report = Instant::now();
+                            progress(ScanProgress {
+                                volume_id: id,
+                                phase: ScanPhase::Committing,
+                                files: counters.files.load(Ordering::Relaxed),
+                                dirs: counters.dirs.load(Ordering::Relaxed),
+                                bytes: counters.bytes.load(Ordering::Relaxed),
+                                errors: counters.errors.load(Ordering::Relaxed),
+                                elapsed_ms: started.elapsed().as_millis() as u64,
+                                current: String::new(),
+                                indexed: n as u64,
+                                index_total,
+                            });
+                        }
                         let Some(f) = db.file(fid)? else { continue };
                         let stages = db.stages(fid)?;
                         let meta = db.meta_json(fid)?;
@@ -697,6 +729,11 @@ impl Catalog {
     pub fn rebuild_index(&self) -> Result<()> {
         let started = Instant::now();
         let vols = self.master().list_volumes()?;
+        self.rebuild_done.store(0, Ordering::Relaxed);
+        self.rebuild_total.store(
+            vols.iter().map(|v| v.file_count + v.dir_count).sum(),
+            Ordering::Relaxed,
+        );
         for v in vols {
             if self.dirs.volume_db(v.id).exists() {
                 self.index_volume_from_db(v.id)?;
@@ -723,6 +760,7 @@ impl Catalog {
                 if d.id == 0 {
                     continue;
                 }
+                self.rebuild_done.fetch_add(1, Ordering::Relaxed);
                 self.index.add_doc(&DocInput {
                     volume_id: id,
                     item_id: d.id,
@@ -749,6 +787,7 @@ impl Catalog {
             }
             for f in &files {
                 after = f.id;
+                self.rebuild_done.fetch_add(1, Ordering::Relaxed);
                 self.index_file_from_db(id, &db, f, &tag_map)?;
             }
         }
@@ -896,6 +935,7 @@ impl Catalog {
                     total: 0,
                     elapsed_ms: 0.0,
                     text: parsed.text,
+                    sort: opts.sort,
                 });
             }
         }
@@ -905,16 +945,22 @@ impl Catalog {
                 total: 0,
                 elapsed_ms: 0.0,
                 text: parsed.text,
+                sort: opts.sort,
             });
         }
 
-        let raw = self.index.search(
-            &parsed,
-            filter.as_deref(),
-            opts.sort,
-            opts.limit,
-            opts.offset,
-        )?;
+        // Nothing to rank by (just filters such as ext:mp3): list by name, not at random.
+        let sort = if opts.sort == SortBy::Relevance
+            && parsed.terms.is_empty()
+            && parsed.phrases.is_empty()
+        {
+            SortBy::NameAsc
+        } else {
+            opts.sort
+        };
+        let raw = self
+            .index
+            .search(&parsed, filter.as_deref(), sort, opts.limit, opts.offset)?;
         let hits = raw
             .hits
             .into_iter()
@@ -943,6 +989,7 @@ impl Catalog {
             total: raw.total,
             elapsed_ms: raw.elapsed_ms,
             text: parsed.text,
+            sort,
         })
     }
 
@@ -1269,6 +1316,32 @@ impl Catalog {
 
     // ----- duplicates -------------------------------------------------------------------
 
+    /// The most common extensions among catalogued files of a kind, across every drive.
+    pub fn extension_counts(&self, kind: Kind, limit: usize) -> Result<Vec<ExtCount>> {
+        let mut totals: HashMap<String, u64> = HashMap::new();
+        for v in self.volumes()? {
+            if !self.dirs.volume_db(v.id).exists() || self.is_scanning(v.id) {
+                continue;
+            }
+            let db = match VolumeDb::open_rw(&self.dirs.volume_db(v.id)) {
+                Ok(db) => db,
+                Err(_) => self.volume_db(v.id)?,
+            };
+            for (k, ext, n) in db.extension_counts()? {
+                if k == kind as u8 {
+                    *totals.entry(ext).or_default() += n;
+                }
+            }
+        }
+        let mut out: Vec<ExtCount> = totals
+            .into_iter()
+            .map(|(ext, files)| ExtCount { ext, files })
+            .collect();
+        out.sort_by(|a, b| b.files.cmp(&a.files).then(a.ext.cmp(&b.ext)));
+        out.truncate(limit);
+        Ok(out)
+    }
+
     /// Totals for your duplicates (copies in app-managed folders left out).
     pub fn duplicate_summary(&self) -> Result<DupSummary> {
         Ok(self
@@ -1278,6 +1351,7 @@ impl Catalog {
                 desc: true,
                 limit: 0,
                 offset: 0,
+                ..Default::default()
             })?
             .summary)
     }
@@ -1296,7 +1370,7 @@ impl Catalog {
             if let Some(group) =
                 self.resolve_group(&g.hash, g.size, &g.members, &volumes, &mut dbs)?
             {
-                if q.scope == DupScope::All || group.user_copies >= 2 {
+                if (q.scope == DupScope::All || group.user_copies >= 2) && q.keeps(&group) {
                     groups.push(group);
                 }
             }
@@ -1727,6 +1801,73 @@ mod tests {
         assert_eq!(cat.volumes().unwrap().len(), 0);
         let r = cat.search("invoice", &SearchOptions::default()).unwrap();
         assert_eq!(r.total, 0);
+    }
+
+    /// Files enriched before Storecat read embedded artwork get just the thumbnail later,
+    /// keeping the metadata and text they already had in search.
+    #[test]
+    fn older_enrichment_gets_artwork_without_losing_text() {
+        let data = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        let mut png = Vec::new();
+        image::RgbImage::from_pixel(320, 240, image::Rgb([200, 40, 40]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        {
+            let f = std::fs::File::create(tree.path().join("deck.pptx")).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let o = zip::write::SimpleFileOptions::default();
+            z.start_file("[Content_Types].xml", o).unwrap();
+            std::io::Write::write_all(&mut z, b"<Types/>").unwrap();
+            z.start_file("ppt/slides/slide1.xml", o).unwrap();
+            std::io::Write::write_all(
+                &mut z,
+                b"<p:sld><a:t>quarterly roadmap for the zeppelin launch</a:t></p:sld>",
+            )
+            .unwrap();
+            z.start_file("docProps/thumbnail.jpeg", o).unwrap();
+            std::io::Write::write_all(&mut z, &png).unwrap();
+            z.finish().unwrap();
+        }
+        let cat = Catalog::open(DataDirs::at(data.path())).unwrap();
+        let v = cat.add_folder(tree.path(), Some("Old")).unwrap();
+        cat.scan(v.id, &two_thread_scan(), &|_| {}).unwrap();
+        // An "older version": everything but thumbnails.
+        let old = EnrichOptions {
+            threads: 2,
+            thumbs: false,
+            ..Default::default()
+        };
+        cat.enrich(v.id, &old, &|_| {}).unwrap();
+        let hit = |q: &str| cat.search(q, &SearchOptions::default()).unwrap().hits;
+        let id = hit("zeppelin")[0].item_id;
+        assert!(cat.thumbnail(v.id, id).unwrap().is_none());
+        assert_eq!(
+            cat.upgrade_enrichment(v.id).unwrap(),
+            0,
+            "already this format"
+        );
+
+        // Pretend the catalogue predates artwork support.
+        VolumeDb::open_rw(&cat.dirs.volume_db(v.id))
+            .unwrap()
+            .set_info("enrich_format", "1")
+            .unwrap();
+        assert_eq!(cat.upgrade_enrichment(v.id).unwrap(), 1);
+        let cov = cat.enrich_coverage(v.id).unwrap();
+        assert!(cov.done < cov.files, "the drive shows work to do");
+
+        let opts = EnrichOptions {
+            threads: 2,
+            ..Default::default()
+        };
+        let stats = cat.enrich(v.id, &opts, &|_| {}).unwrap();
+        assert_eq!(stats.thumbs, 1);
+        assert_eq!(stats.hashed, 0, "nothing else is redone");
+        assert!(cat.thumbnail(v.id, id).unwrap().is_some());
+        assert_eq!(hit("zeppelin").len(), 1, "document text still searchable");
+        let cov = cat.enrich_coverage(v.id).unwrap();
+        assert_eq!(cov.done, cov.files);
     }
 
     #[test]

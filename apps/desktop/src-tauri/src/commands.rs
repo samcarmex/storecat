@@ -8,9 +8,10 @@ use serde::Serialize;
 use storecat_core::suggest::{RuleSettings, Suggestion};
 use storecat_core::{
     settings, Catalog, CatalogStats, DetectedVolume, DownloadProgress, DupGroup, DupPage, DupPick,
-    DupQuery, DupSummary, EnrichCoverage, EnrichOptions, EnrichPhase, EnrichProgress, FfmpegStatus,
-    FolderTree, ItemDetail, ItemStatus, ItemType, Job, JobItem, JobKind, JobPlan, JobSpec,
-    KindBytes, SavedSearch, ScanOptions, SearchOptions, SearchResponse, Tag, Volume, VolumePatch,
+    DupQuery, DupSummary, EnrichCoverage, EnrichOptions, EnrichPhase, EnrichProgress, ExtCount,
+    FfmpegStatus, FolderTree, ItemDetail, ItemStatus, ItemType, Job, JobItem, JobKind, JobPlan,
+    JobSpec, Kind, KindBytes, SavedSearch, ScanOptions, SearchOptions, SearchResponse, Tag, Volume,
+    VolumePatch,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -360,6 +361,15 @@ pub fn reveal_item(
 }
 
 // ----- duplicates ----------------------------------------------------------------------
+
+/// The commonest extensions of a kind, for the search filter chips.
+#[tauri::command]
+pub async fn extension_counts(app: AppHandle, kind: Kind) -> CmdResult<Vec<ExtCount>> {
+    let catalog = Arc::clone(&app.state::<AppState>().catalog);
+    tauri::async_runtime::spawn_blocking(move || catalog.extension_counts(kind, 14).map_err(err))
+        .await
+        .map_err(err)?
+}
 
 #[tauri::command]
 pub async fn duplicates(app: AppHandle, query: DupQuery) -> CmdResult<DupPage> {
