@@ -910,7 +910,7 @@ mod tests {
 
     struct Fixture {
         _data: tempfile::TempDir,
-        disk: tempfile::TempDir,
+        _disk: tempfile::TempDir,
         cat: Arc<Catalog>,
         id: VolumeId,
     }
@@ -937,14 +937,21 @@ mod tests {
             cat.scan(v.id, &opts, &|_| {}).unwrap();
             Self {
                 _data: data,
-                disk,
+                _disk: disk,
                 cat,
                 id: v.id,
             }
         }
 
+        /// A path on the test volume, spelled the way the catalogue (and so the watcher)
+        /// knows its root: temp folders can have another spelling, such as `/private/var`
+        /// for `/var` on macOS or an 8.3 short name on Windows.
+        fn root(&self) -> PathBuf {
+            PathBuf::from(self.cat.volume(self.id).unwrap().mount_path.unwrap())
+        }
+
         fn p(&self, rel: &str) -> PathBuf {
-            let mut p = self.disk.path().to_path_buf();
+            let mut p = self.root();
             for part in rel.split('/') {
                 p.push(part);
             }
@@ -1170,7 +1177,8 @@ mod tests {
             Change::Path(fx.cat.dirs.master_db()),
         ]);
         assert!(!s.changed());
-        let root = fx.disk.path();
+        let root = fx.root();
+        let root = root.as_path();
         assert_eq!(
             fx.cat.live_rel_path(root, &fx.p("docs/a.txt")).as_deref(),
             Some("docs/a.txt")
