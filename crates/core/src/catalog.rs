@@ -2012,6 +2012,54 @@ mod tests {
         assert_eq!(names("song is:leftover"), vec!["._song.mp3"]);
     }
 
+    /// Zips made on a Mac carry a `__MACOSX` folder with an AppleDouble copy of every file.
+    #[test]
+    fn mac_zip_leftovers_are_hidden_from_search() {
+        let data = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        {
+            let f = std::fs::File::create(tree.path().join("tracks.zip")).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let o = zip::write::SimpleFileOptions::default();
+            // Finder writes the folder entries too.
+            z.add_directory("__MACOSX/", o).unwrap();
+            for (name, body) in [
+                ("Album/anthem.mp3", &b"music"[..]),
+                ("Album/._anthem.mp3", &b"\x00\x05\x16\x07mac"[..]),
+                ("__MACOSX/Album/._anthem.mp3", &b"\x00\x05\x16\x07mac"[..]),
+            ] {
+                z.start_file(name, o).unwrap();
+                std::io::Write::write_all(&mut z, body).unwrap();
+            }
+            z.finish().unwrap();
+        }
+        let cat = Catalog::open(DataDirs::at(data.path())).unwrap();
+        let v = cat.add_folder(tree.path(), Some("Mac zips")).unwrap();
+        cat.scan(v.id, &two_thread_scan(), &|_| {}).unwrap();
+        let opts = EnrichOptions {
+            threads: 2,
+            ..Default::default()
+        };
+        cat.enrich(v.id, &opts, &|_| {}).unwrap();
+        let paths = |q: &str| -> Vec<String> {
+            let mut n: Vec<String> = cat
+                .search(q, &SearchOptions::default())
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|h| format!("{}/{}", h.path.replace('\\', "/"), h.name))
+                .collect();
+            n.sort();
+            n
+        };
+        assert_eq!(paths("anthem"), vec!["tracks.zip/Album/anthem.mp3"]);
+        assert_eq!(paths("ext:mp3"), vec!["tracks.zip/Album/anthem.mp3"]);
+        assert!(paths("macosx").is_empty());
+        let hidden = paths("is:leftover");
+        assert_eq!(hidden.len(), 3, "{hidden:?}");
+        assert!(hidden.iter().any(|p| p.ends_with("/__MACOSX")));
+    }
+
     #[test]
     fn index_catches_up_after_an_interrupted_run() {
         let data = tempfile::tempdir().unwrap();

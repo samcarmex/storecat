@@ -39,6 +39,10 @@ const RETRY_WATCH: Duration = Duration::from_secs(300);
 const ENRICH_EVERY: Duration = Duration::from_secs(60);
 /// On Windows a burst this large may have overflowed the change buffer unnoticed.
 const BURST_EVENTS: usize = 500;
+/// A whole drive is rescanned for live changes at most this long after its last scan; a
+/// request in between waits (changes keep being applied meanwhile). A busy system drive
+/// can overflow the change buffer often, and each rescan reads every file entry.
+const FULL_RESCAN_GAP_SECS: i64 = 10 * 60;
 /// Failed applies are retried this many times before the volume is rescanned instead.
 const MAX_FAILURES: u32 = 3;
 
@@ -505,7 +509,20 @@ impl Live {
     }
 
     fn start_rescans(&mut self) {
-        for id in std::mem::take(&mut self.rescan_full) {
+        let now = storecat_core::now_unix();
+        for id in self.rescan_full.iter().copied().collect::<Vec<_>>() {
+            if !self.catalog.is_scanning(id) {
+                let last = self
+                    .catalog
+                    .volume(id)
+                    .ok()
+                    .and_then(|v| v.last_scan_at)
+                    .unwrap_or(0);
+                if now - last < FULL_RESCAN_GAP_SECS {
+                    continue; // asked again on the next pass
+                }
+            }
+            self.rescan_full.remove(&id);
             self.pending.remove(&id);
             if self.catalog.is_scanning(id) {
                 continue;

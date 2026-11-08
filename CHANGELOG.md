@@ -101,7 +101,8 @@ The feature-complete build for 1.0, for testing on real drive collections.
 - Storecat's own data folder and the package, cache and system folders scans skip are
   ignored. Folder sizes are worked out again the next time the Storage view opens.
 - When the system loses track of changes (a very large burst of them), the folder
-  concerned is compared with the disk again, or the drive rescanned in the background.
+  concerned is compared with the disk again, or the drive rescanned in the background,
+  at most once every ten minutes per drive.
 - Network shares are not watched: notifications from other computers don't arrive
   reliably. They keep relying on rescans, as do changes made while Storecat was closed.
 - Settings → Behaviour → "Pick up changes while Storecat runs" turns it off.
@@ -120,7 +121,9 @@ The feature-complete build for 1.0, for testing on real drive collections.
 
 **Leftover files from macOS and Windows**
 - `._name`, `.DS_Store`, `Thumbs.db` and `desktop.ini` files are hidden from search
-  (`is:leftover` shows them). The search index rebuilds once after updating.
+  (`is:leftover` shows them), and so are the same files inside zips and other archives,
+  along with the `__MACOSX` folder Mac-made zips carry. The search index rebuilds once
+  after updating.
 - A suggestion offers a job that recycles a drive's leftovers; `._` files are checked to
   really be macOS metadata first.
 

@@ -7,6 +7,23 @@ pub fn is_os_leftover(name: &str) -> bool {
     is_cleanable_leftover(name) || name.eq_ignore_ascii_case("desktop.ini")
 }
 
+/// Whether a catalogued item is an operating-system leftover, hidden from search. As well
+/// as loose leftover files, that covers the same files inside archives and everything in
+/// the `__MACOSX` folder macOS adds to the zips it makes (AppleDouble copies of each file),
+/// and that folder itself. `path` is the folder the item sits in.
+pub fn is_leftover_item(item_type: crate::model::ItemType, name: &str, path: &str) -> bool {
+    use crate::model::ItemType;
+    let macosx = |s: &str| s.eq_ignore_ascii_case("__MACOSX");
+    if macosx(name) {
+        return item_type != ItemType::File;
+    }
+    match item_type {
+        ItemType::File => is_os_leftover(name),
+        ItemType::ArchiveEntry => is_os_leftover(name) || path.split(['/', '\\']).any(macosx),
+        ItemType::Dir => false,
+    }
+}
+
 /// Leftovers that are safe to delete on Windows: macOS "AppleDouble" companions (`._name`,
 /// holding Finder tags and resource forks), Finder's `.DS_Store`, and Windows' thumbnail
 /// caches. `desktop.ini` is not one: Windows uses it for folder icons and names.
@@ -72,6 +89,28 @@ mod tests {
         assert!(!is_os_leftover("._"));
         assert!(!is_os_leftover(".env"));
         assert!(!is_os_leftover("song.mp3"));
+    }
+
+    #[test]
+    fn leftovers_inside_archives() {
+        use crate::model::ItemType::*;
+        let zip = "Music/Zeph vs Dot.zip";
+        assert!(is_leftover_item(ArchiveEntry, "._Track.mp3", zip));
+        assert!(is_leftover_item(
+            ArchiveEntry,
+            "Track.mp3",
+            "Music/x.zip/__MACOSX/Zeph"
+        ));
+        assert!(is_leftover_item(ArchiveEntry, "__MACOSX", zip));
+        assert!(is_leftover_item(Dir, "__MACOSX", "Downloads"));
+        assert!(!is_leftover_item(
+            ArchiveEntry,
+            "Track.mp3",
+            "Music/x.zip/Zeph"
+        ));
+        assert!(!is_leftover_item(Dir, "Zeph", "Music"));
+        assert!(!is_leftover_item(File, "__MACOSX", "Music"));
+        assert!(is_leftover_item(File, "._Track.mp3", "Music"));
     }
 
     #[test]

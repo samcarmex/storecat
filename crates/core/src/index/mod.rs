@@ -61,7 +61,7 @@ pub fn name_key(name: &str) -> u64 {
 
 /// Bumped when documents change shape without the Tantivy schema changing (a new flag
 /// bit, say): the index is then rebuilt from the catalogues on the next start.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 const VERSION_FILE: &str = "storecat-index-version";
 
 #[derive(Clone, Copy)]
@@ -355,7 +355,7 @@ impl SearchIndex {
         doc.add_u64(f.kind, d.kind as u8 as u64);
         doc.add_u64(f.size, d.size);
         doc.add_i64(f.mtime, d.mtime);
-        let flags = if d.item_type == ItemType::File && crate::places::is_os_leftover(d.name) {
+        let flags = if crate::places::is_leftover_item(d.item_type, d.name, d.path) {
             d.flags | flags::OS_LEFTOVER
         } else {
             d.flags
