@@ -616,6 +616,28 @@ impl VolumeDb {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Every folder as (id, parent id, path), for building folder trees in memory.
+    pub fn dir_tree(&self) -> Result<Vec<(i64, Option<i64>, String)>> {
+        let mut stmt = self.conn.prepare("SELECT id, parent_id, path FROM dirs")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// (file id, folder id, kind) for files at or above `min_size`.
+    pub fn file_places(&self, min_size: u64) -> Result<Vec<(i64, i64, Kind)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, dir_id, kind FROM files WHERE size >= ?1")?;
+        let rows = stmt.query_map([min_size as i64], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                Kind::from_u8(r.get::<_, i64>(2)? as u8),
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     // ----- enrichment writes -------------------------------------------------------------
 
     pub fn begin(&self) -> Result<()> {

@@ -7,6 +7,7 @@
 //! storecat enrich <id> [--hdd|--ssd]   hashes, metadata, thumbnails, text, archives
 //! storecat search <query...>           search; --limit N --sort relevance|modified|size
 //! storecat dupes [--all] [--verify]    duplicate groups across all drives
+//! storecat overlap [--folders N|--json] what drives share, and folders copied between them
 //! storecat export <id> <dir>           copy a volume's catalogue out
 //! storecat import <file>               bring a catalogue back in
 //! storecat ffmpeg [--download]         show or install the FFmpeg sidecar
@@ -48,6 +49,7 @@ fn main() -> anyhow::Result<()> {
         "enrich" => cmd_enrich(rest)?,
         "search" | "s" => cmd_search(rest)?,
         "dupes" | "duplicates" => cmd_dupes(rest)?,
+        "overlap" => cmd_overlap(rest)?,
         "export" => cmd_export(rest)?,
         "import" => cmd_import(rest)?,
         "ffmpeg" => cmd_ffmpeg(rest)?,
@@ -417,6 +419,88 @@ fn cmd_search(args: &[String]) -> anyhow::Result<()> {
         r.total,
         r.elapsed_ms
     );
+    Ok(())
+}
+
+fn cmd_overlap(args: &[String]) -> anyhow::Result<()> {
+    let n: usize = args
+        .iter()
+        .position(|a| a == "--folders")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let cat = open()?;
+    let r = cat.overlap_report()?;
+    if args.iter().any(|a| a == "--json") {
+        println!("{}", serde_json::to_string_pretty(&*r)?);
+        return Ok(());
+    }
+    let label = |id: i64| {
+        cat.volume(id)
+            .map(|v| v.label)
+            .unwrap_or_else(|_| format!("#{id}"))
+    };
+    println!(
+        "{} distinct, {} reclaimable, {} on one drive only, {} on two or more  ({} ms)",
+        human_bytes(r.distinct),
+        human_bytes(r.reclaimable),
+        human_bytes(r.single_copy),
+        human_bytes(r.multi_copy),
+        r.elapsed_ms
+    );
+    println!(
+        "
+Drives (distinct, only here, extra copies within):"
+    );
+    for d in &r.drives {
+        println!(
+            "  {:>3} {:24} {:>10} {:>10} {:>10}",
+            d.volume_id,
+            label(d.volume_id),
+            human_bytes(d.distinct),
+            human_bytes(d.only_here),
+            human_bytes(d.within)
+        );
+    }
+    println!(
+        "
+Shared between drives:"
+    );
+    for p in r.pairs.iter().take(15) {
+        println!(
+            "  {:>10}  {} + {}",
+            human_bytes(p.shared),
+            label(p.a),
+            label(p.b)
+        );
+    }
+    println!(
+        "
+Folder matches ({} listed{}):",
+        r.folders.len(),
+        if r.more_folders > 0 {
+            format!(", {} more", r.more_folders)
+        } else {
+            String::new()
+        }
+    );
+    for m in r.folders.iter().take(n) {
+        let rel = match m.relation {
+            storecat_core::overlap::Relation::Identical => "identical to",
+            storecat_core::overlap::Relation::Inside => "inside",
+            storecat_core::overlap::Relation::MostlyInside => "mostly inside",
+        };
+        println!(
+            "  {:>10}  [{}] {}  {}  [{}] {}   keep {}",
+            human_bytes(m.shared),
+            label(m.a.volume_id),
+            m.a.path,
+            rel,
+            label(m.b.volume_id),
+            m.b.path,
+            m.keep
+        );
+    }
     Ok(())
 }
 

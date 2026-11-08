@@ -482,6 +482,19 @@ pub async fn duplicates(app: AppHandle, query: DupQuery) -> CmdResult<DupPage> {
         .map_err(err)?
 }
 
+/// What the drives share: per-drive and per-pair totals and folders copied between them.
+/// Worked out from the catalogue (no drive needs to be connected) and cached until the
+/// hashes change.
+#[tauri::command]
+pub async fn overlap_report(app: AppHandle) -> CmdResult<storecat_core::overlap::OverlapReport> {
+    let catalog = Arc::clone(&app.state::<AppState>().catalog);
+    tauri::async_runtime::spawn_blocking(move || {
+        catalog.overlap_report().map(|r| (*r).clone()).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
 #[tauri::command]
 pub fn duplicate_summary(state: State<AppState>) -> CmdResult<DupSummary> {
     state.catalog.duplicate_summary().map_err(err)

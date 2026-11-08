@@ -44,6 +44,10 @@ pub struct Catalog {
     /// Folder volumes (local folders, network shares): reachable?, free, capacity. Filled
     /// by `refresh_folders` off the UI path so an unreachable NAS never blocks a call.
     pub(crate) folder_status: RwLock<HashMap<VolumeId, FolderStatus>>,
+    /// The last cross-drive overlap report, with the hash generation and size threshold
+    /// it was built from.
+    #[allow(clippy::type_complexity)]
+    pub(crate) overlap: Mutex<Option<((u64, u64), Arc<crate::overlap::OverlapReport>)>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +90,7 @@ impl Catalog {
             running_jobs: Mutex::new(HashMap::new()),
             cancelled_jobs: Mutex::new(HashSet::new()),
             folder_status: RwLock::new(HashMap::new()),
+            overlap: Mutex::new(None),
         });
         // A rebuild that was interrupted (process exit mid-way) leaves its marker behind.
         let marker = cat.dirs.index_dir().join(".rebuild-pending");

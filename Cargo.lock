@@ -4891,6 +4891,7 @@ dependencies = [
  "anyhow",
  "env_logger",
  "log",
+ "serde_json",
  "storecat-core",
  "storecat-extract",
  "storecat-platform",

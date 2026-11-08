@@ -328,6 +328,57 @@ export interface DupPage {
   summary: DupSummary;
 }
 
+/** What the drives share, from `overlap_report`. */
+export interface OverlapReport {
+  /** Distinct content across all drives (each file counted once). */
+  distinct: number;
+  /** Space freed by keeping exactly one copy of everything. */
+  reclaimable: number;
+  /** Distinct content held on one drive only. */
+  single_copy: number;
+  /** Distinct content on two or more drives. */
+  multi_copy: number;
+  single_by_kind: { kind: Kind; bytes: number }[];
+  drives: DriveOverlap[];
+  pairs: { a: number; b: number; shared: number }[];
+  folders: FolderMatch[];
+  more_folders: number;
+  min_file_bytes: number;
+  min_folder_bytes: number;
+  elapsed_ms: number;
+}
+
+export interface DriveOverlap {
+  volume_id: number;
+  hashed: number;
+  distinct: number;
+  only_here: number;
+  /** Extra copies within the drive itself. */
+  within: number;
+}
+
+export interface FolderSide {
+  volume_id: number;
+  dir_id: number;
+  path: string;
+  bytes: number;
+  files: number;
+}
+
+export type FolderRelation = "identical" | "inside" | "mostly_inside";
+
+export interface FolderMatch {
+  /** The folder (mostly) inside the other. */
+  a: FolderSide;
+  b: FolderSide;
+  relation: FolderRelation;
+  /** Content of `a` also in `b`. */
+  shared: number;
+  keep: "a" | "b";
+  /** Matches sharing a folder have the same group. */
+  group: number;
+}
+
 export interface DupPick {
   hash: string;
   keep_volume_id: number;
@@ -439,6 +490,7 @@ export const api = {
 
   duplicates: (query: DupQuery) => invoke<DupPage>("duplicates", { query }),
   extensionCounts: (kind: Kind) => call<ExtCount[]>("extension_counts", { kind }, []),
+  overlapReport: () => invoke<OverlapReport>("overlap_report"),
   duplicateSummary: () => call<DupSummary>("duplicate_summary", {}, { groups: 0, files: 0, waste: 0 }),
   verifyGroup: (hash: string) => invoke<DupGroup>("verify_group", { hash }),
   verifying: () => call<VerifyProgress[]>("verifying", {}, []),

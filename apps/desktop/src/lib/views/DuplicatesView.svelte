@@ -1,6 +1,10 @@
 <script lang="ts" module>
   /** What the user opened and chose, kept while they visit other views. */
-  const remembered: { open: Set<string>; keep: Record<string, string> } = { open: new Set(), keep: {} };
+  const remembered: { open: Set<string>; keep: Record<string, string>; tab: "files" | "drives" } = {
+    open: new Set(),
+    keep: {},
+    tab: "files",
+  };
 </script>
 
 <script lang="ts">
@@ -9,6 +13,7 @@
   import type { ViewId } from "../nav";
   import { bytes, count, date, displayPath, KIND_TILE } from "../format";
   import EmptyState from "../components/EmptyState.svelte";
+  import OverlapView from "./OverlapView.svelte";
 
   let { store, onNavigate }: { store: AppStore; onNavigate: (view: ViewId) => void } = $props();
 
@@ -54,6 +59,12 @@
   }
   /** Drives that have hashed files, the only ones that can hold duplicates. */
   const drives = $derived(store.volumes.filter((v) => (store.coverage[v.id]?.hashed ?? 0) > 0));
+
+  /** Matching files, or how the drives overlap as a whole. */
+  let tab = $state<"files" | "drives">(remembered.tab);
+  $effect(() => {
+    remembered.tab = tab;
+  });
 
   let open = $state<Set<string>>(new Set(remembered.open));
   /** Chosen copy to keep per group, "volume:file". */
@@ -113,7 +124,7 @@
     void kindId;
     void driveId;
     void readyOnly;
-    void load();
+    if (tab === "files") void load();
   });
 
   function sortBy(s: DupSort) {
@@ -248,7 +259,9 @@
 <div class="head">
   <h1>Same file, <em>several shelves.</em></h1>
   <span class="muted">
-    {#if summary.groups > 0}
+    {#if tab === "drives"}
+      What your drives share, and what exists on only one of them
+    {:else if summary.groups > 0}
       {count(summary.groups)} {summary.groups === 1 ? "group" : "groups"} · {count(summary.files)} {summary.files === 1 ? "file" : "files"} · {bytes(summary.waste)} reclaimable
     {:else}
       Files over the size threshold that share a hash across your drives
@@ -256,6 +269,14 @@
   </span>
 </div>
 
+<div class="tabs" role="tablist" aria-label="Duplicates view">
+  <button role="tab" aria-selected={tab === "files"} class:on={tab === "files"} onclick={() => (tab = "files")}>Files</button>
+  <button role="tab" aria-selected={tab === "drives"} class:on={tab === "drives"} onclick={() => (tab = "drives")}>Across drives</button>
+</div>
+
+{#if tab === "drives"}
+  <OverlapView {store} />
+{:else}
 <div class="toolbar">
   <div class="seg" role="group" aria-label="Which duplicates">
     <button class:on={scope === "mine"} onclick={() => setScope("mine")} title="Copies in app caches, build output and app data are left out">Your files</button>
@@ -432,6 +453,7 @@
     {/if}
   </section>
 {/if}
+{/if}
 
 <style>
   .head {
@@ -451,6 +473,28 @@
   }
   .head .muted {
     padding-bottom: 6px;
+  }
+  .tabs {
+    display: flex;
+    gap: 22px;
+    border-bottom: 1px solid var(--line);
+  }
+  .tabs button {
+    border: 0;
+    background: transparent;
+    color: var(--fg-soft);
+    font-size: 13px;
+    padding: 0 0 10px;
+    margin-bottom: -1px;
+    border-bottom: 2px solid transparent;
+  }
+  .tabs button:hover {
+    color: var(--fg);
+  }
+  .tabs button.on {
+    color: var(--fg);
+    font-weight: 600;
+    border-bottom-color: var(--accent);
   }
   .toolbar {
     display: flex;

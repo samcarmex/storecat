@@ -17,6 +17,7 @@ storecat-core.workspace = true
 storecat-platform.workspace = true
 storecat-extract.workspace = true
 anyhow.workspace = true
+serde_json.workspace = true
 env_logger = "0.11.11"
 log = "0.4.35"
 time = "0.3.45"

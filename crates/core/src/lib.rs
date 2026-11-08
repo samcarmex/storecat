@@ -12,6 +12,7 @@ pub mod kind;
 pub mod live;
 pub mod model;
 pub mod ops;
+pub mod overlap;
 pub mod paths;
 pub mod places;
 pub mod scan;

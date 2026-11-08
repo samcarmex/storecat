@@ -150,6 +150,7 @@ pub fn run() {
             commands::enrich_coverage,
             commands::reset_enrichment,
             commands::duplicates,
+            commands::overlap_report,
             commands::extension_counts,
             commands::duplicate_summary,
             commands::verify_group,

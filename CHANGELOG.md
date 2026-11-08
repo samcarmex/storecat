@@ -137,6 +137,17 @@ The feature-complete build for 1.0, for testing on real drive collections.
 - Settings → Behaviour → "Pick up changes while Storecat runs" turns it off.
 
 **Duplicates you can act on**
+- **Across drives** tab in Duplicates, worked out from the catalogue so no drive needs to
+  be connected: how much could be reclaimed, how much exists on one drive only (by type),
+  and an overlap map shading how much each pair of drives shares. Clicking a square lists
+  the folders those two drives have in common.
+- Folder matches: folders over 1 GB that are identical to, inside, or 95%+ inside another
+  folder on any drive, with the space in the extra copy and a suggested side to keep (not
+  a backup or a failing drive). Nested matches are folded into the outermost one, and
+  matches that share a folder are shown together.
+- "Only on this drive": what would be lost if each drive failed, and which drive has the
+  room to take a copy.
+- `storecat overlap [--json]` prints the same report from the command line.
 - Columns sort by clicking their heading; the default is largest reclaimable space first.
 - "Verify now" shows a progress bar (which copy, how much read) that is still there after
   visiting another view, and copies hashed in full before are not read again. Open groups

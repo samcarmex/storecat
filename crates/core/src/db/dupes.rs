@@ -3,6 +3,7 @@
 //! so the always-open database stays tiny; rebuilt per volume after each enrichment run.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::{params, Connection};
 
@@ -11,6 +12,8 @@ use crate::model::VolumeId;
 
 pub struct DupesDb {
     conn: Connection,
+    /// Bumped whenever entries change, so results derived from them know when to refresh.
+    generation: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -20,6 +23,9 @@ pub struct RawGroup {
     pub count: u64,
     pub members: Vec<(VolumeId, i64)>,
 }
+
+/// A hashed file: (hash, size, volume, file id).
+pub type Entry = (Vec<u8>, u64, VolumeId, i64);
 
 impl DupesDb {
     pub fn open(path: &Path) -> Result<Self> {
@@ -36,11 +42,31 @@ impl DupesDb {
              ) WITHOUT ROWID;
              CREATE INDEX IF NOT EXISTS entries_hash ON entries(hash);",
         )?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            generation: AtomicU64::new(1),
+        })
+    }
+
+    /// Changes with every write to the entries.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// Every entry at or above `min_size`: (hash, size, volume, file).
+    pub fn all_entries(&self, min_size: u64) -> Result<Vec<Entry>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT hash, size, volume_id, file_id FROM entries WHERE size >= ?1")?;
+        let rows = stmt.query_map([min_size as i64], |r| {
+            Ok((r.get(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?, r.get(3)?))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     /// Replace all entries of a volume.
     pub fn replace_volume(&self, volume_id: VolumeId, rows: &[(Vec<u8>, u64, i64)]) -> Result<()> {
+        self.generation.fetch_add(1, Ordering::Relaxed);
         self.conn.execute_batch("BEGIN")?;
         let r = (|| -> Result<()> {
             self.conn
@@ -64,6 +90,7 @@ impl DupesDb {
     }
 
     pub fn remove_volume(&self, volume_id: VolumeId) -> Result<()> {
+        self.generation.fetch_add(1, Ordering::Relaxed);
         self.conn
             .execute("DELETE FROM entries WHERE volume_id = ?1", [volume_id])?;
         Ok(())
