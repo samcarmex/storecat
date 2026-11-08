@@ -362,6 +362,24 @@ impl MasterDb {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Apply live changes to a volume's totals without a new scan.
+    pub fn adjust_counts(
+        &self,
+        volume_id: VolumeId,
+        files: i64,
+        dirs: i64,
+        bytes: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE volumes SET file_count = MAX(0, file_count + ?2),
+                                dir_count = MAX(0, dir_count + ?3),
+                                total_bytes = MAX(0, total_bytes + ?4)
+             WHERE id = ?1",
+            params![volume_id, files, dirs, bytes],
+        )?;
+        Ok(())
+    }
+
     pub fn finish_scan(&self, scan_id: i64, volume_id: VolumeId, stats: &ScanStats) -> Result<()> {
         let now = now_unix();
         self.conn.execute(

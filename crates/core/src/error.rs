@@ -18,6 +18,9 @@ pub enum Error {
     VolumeOffline,
     #[error("a scan is already running for this volume")]
     ScanInProgress,
+    /// Another scan holds the catalogue right now; try again shortly.
+    #[error("the catalogue is busy with a scan")]
+    Busy,
     #[error("{0}")]
     Other(String),
 }

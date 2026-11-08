@@ -685,9 +685,14 @@ impl PassRun<'_> {
             } else {
                 ENRICH_DONE
             };
-            let entries = self
+            let Some(entries) = self
                 .writer
-                .write_enrichment(&out.row, done_value, now_unix())?;
+                .write_enrichment(&out.row, done_value, now_unix())?
+            else {
+                // Deleted or changed on disk while it was read: live changes took it out.
+                done += 1;
+                continue;
+            };
             if let Some((jpeg, w, h)) = &out.row.thumb {
                 self.thumbs.put(out.file.id, jpeg, *w, *h)?;
             }
@@ -751,6 +756,9 @@ impl PassRun<'_> {
         pass: u8,
         pending: &mut Vec<Written>,
     ) -> Result<()> {
+        // Live changes may have removed or moved files since they were read: index what
+        // the catalogue holds now, under the same lock live changes take.
+        let _live = cat.live_gate.lock().unwrap_or_else(|e| e.into_inner());
         for (out, entries) in pending.drain(..) {
             let r = &out.row;
             if r.error.is_some() {
@@ -759,9 +767,12 @@ impl PassRun<'_> {
             if r.stages & !STAGE_SKIPPED_PLACEHOLDER == 0 {
                 continue; // nothing new for the index
             }
+            let Some(file) = self.writer.file(out.file.id)? else {
+                continue;
+            };
             let tags = self
                 .tag_map
-                .get(&item_path(&out.file))
+                .get(&item_path(&file))
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
             // The detail pass never lists archives: leave entry documents alone.
@@ -772,7 +783,7 @@ impl PassRun<'_> {
             };
             cat.index_enriched_file(
                 self.id,
-                &out.file,
+                &file,
                 out.meta_json.as_deref(),
                 r.text.as_deref().or(out.prior_text.as_deref()),
                 stages,

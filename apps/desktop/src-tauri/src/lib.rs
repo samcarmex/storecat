@@ -3,6 +3,7 @@
 
 mod commands;
 mod diagnostics;
+mod live;
 mod shell;
 mod watcher;
 
@@ -101,6 +102,7 @@ pub fn run() {
                     log::warn!("global shortcut not registered: {e}");
                 }
             }
+            live::start(app.handle().clone(), Arc::clone(&catalog));
             watcher::start(app.handle().clone(), catalog);
             Ok(())
         })

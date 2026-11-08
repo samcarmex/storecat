@@ -35,6 +35,13 @@ files take about half a minute on an SSD. Nothing on the drive is changed.
 - **Plug it back in later** and the drive is rescanned silently. Its catalogue is also
   copied to `.storecat\catalog.db` on the drive itself, so another computer can import it.
   The drive Windows runs from is the exception: nothing is written to it.
+- **Changes while Storecat runs** are picked up as they happen. Add, rename or delete a
+  file on a connected drive or in a catalogued folder, in Explorer or any other app, and
+  search shows it within a few seconds. Renamed files keep their details and thumbnails;
+  new files are enriched a minute or so later. Changes made while Storecat was closed are
+  caught by the rescan when the drive is next plugged in (or **Rescan** on its card).
+  Network shares aren't watched, because their change notifications aren't reliable:
+  rescan them to catch up. Turn watching off under Settings → Behaviour.
 
 Give each drive a **role** from the menu on its card: Working, Media, Archive, Backup or
 System. Roles are how Storecat decides where suggested moves should go.

@@ -630,12 +630,17 @@ impl VolumeDb {
 
     /// Write one file's enrichment. Archive entries are replaced; returns their new ids.
     /// `done` is [`ENRICH_DONE`] or [`ENRICH_DETAIL_PENDING`]; stage bits accumulate.
+    /// Returns `None`, writing nothing, when the file has left the catalogue meanwhile
+    /// (deleted or changed on disk while enrichment read it).
     pub fn write_enrichment(
         &self,
         row: &EnrichRow,
         done: u8,
         now: i64,
-    ) -> Result<Vec<(i64, storecat_extract::ArchiveEntry)>> {
+    ) -> Result<Option<Vec<(i64, storecat_extract::ArchiveEntry)>>> {
+        if !self.has_file(row.file_id)? {
+            return Ok(None);
+        }
         if let Some(q) = &row.quick_hash {
             self.conn.execute(
                 "INSERT INTO hashes (file_id, quick, quick_at) VALUES (?1, ?2, ?3)
@@ -684,7 +689,14 @@ impl VolumeDb {
                  error = COALESCE(excluded.error, enrich.error), at = excluded.at",
             params![row.file_id, done as i64, row.stages as i64, row.error, now],
         )?;
-        Ok(new_entries)
+        Ok(Some(new_entries))
+    }
+
+    pub fn has_file(&self, file_id: i64) -> Result<bool> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1)")?;
+        Ok(stmt.query_row([file_id], |r| r.get::<_, i64>(0))? != 0)
     }
 
     /// Record files that need no reading at all (or only the second pass) in one go.
@@ -702,7 +714,8 @@ impl VolumeDb {
 
     pub fn mark_enriched(&self, file_id: i64, done: u8, stages: u32, now: i64) -> Result<()> {
         let mut stmt = self.conn.prepare_cached(
-            "INSERT INTO enrich (file_id, done, stages, at) VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO enrich (file_id, done, stages, at)
+             SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM files WHERE id = ?1)
              ON CONFLICT(file_id) DO UPDATE SET done = excluded.done,
                  stages = enrich.stages | excluded.stages, at = excluded.at",
         )?;
@@ -935,6 +948,20 @@ impl ThumbDb {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         Ok(Self { conn })
+    }
+
+    /// Drop the thumbnails of files that left the catalogue.
+    pub fn delete(&self, file_ids: &[i64]) -> Result<()> {
+        self.conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached("DELETE FROM thumbs WHERE file_id = ?1")?;
+            for id in file_ids {
+                stmt.execute([id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn put(&self, file_id: i64, jpeg: &[u8], w: u32, h: u32) -> Result<()> {

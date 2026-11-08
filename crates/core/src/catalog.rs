@@ -31,7 +31,10 @@ pub struct Catalog {
     detected: RwLock<Vec<DetectedVolume>>,
     scanning: Mutex<HashSet<VolumeId>>,
     pub(crate) enriching: Mutex<HashMap<VolumeId, Arc<AtomicBool>>>,
-    scan_gate: Mutex<()>,
+    pub(crate) scan_gate: Mutex<()>,
+    /// Held while live changes are applied, and by enrichment while it updates the index,
+    /// so enrichment never re-adds a document for a file that just went away.
+    pub(crate) live_gate: Mutex<()>,
     index_rebuilding: AtomicBool,
     rebuild_done: std::sync::atomic::AtomicU64,
     rebuild_total: std::sync::atomic::AtomicU64,
@@ -56,6 +59,8 @@ pub mod settings {
     pub const AUTO_ENRICH: &str = "auto_enrich";
     pub const COPY_TO_DRIVE: &str = "copy_catalog_to_drive";
     pub const HASH_MIN_BYTES: &str = "hash_min_bytes";
+    /// Watch connected drives and catalogued folders for changes while the app runs.
+    pub const LIVE_WATCH: &str = "live_watch";
 }
 
 impl Catalog {
@@ -73,6 +78,7 @@ impl Catalog {
             scanning: Mutex::new(HashSet::new()),
             enriching: Mutex::new(HashMap::new()),
             scan_gate: Mutex::new(()),
+            live_gate: Mutex::new(()),
             index_rebuilding: AtomicBool::new(false),
             rebuild_done: std::sync::atomic::AtomicU64::new(0),
             rebuild_total: std::sync::atomic::AtomicU64::new(0),
@@ -795,7 +801,7 @@ impl Catalog {
     }
 
     /// (Re)index one file from its volume database, enrichment included.
-    fn index_file_from_db(
+    pub(crate) fn index_file_from_db(
         &self,
         id: VolumeId,
         db: &VolumeDb,

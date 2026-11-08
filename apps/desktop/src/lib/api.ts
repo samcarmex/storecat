@@ -449,6 +449,11 @@ export const api = {
     if (!isTauri()) return Promise.resolve(() => {});
     return listen("volumes-changed", () => handler());
   },
+  /** Files changed on a watched drive and the catalogue was updated in place. */
+  onCatalogChanged(handler: (volumeId: number) => void): Promise<UnlistenFn> {
+    if (!isTauri()) return Promise.resolve(() => {});
+    return listen<number>("catalog-changed", (e) => handler(e.payload));
+  },
 };
 
 // ----- Phase 3 -----------------------------------------------------------------------------

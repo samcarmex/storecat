@@ -26,6 +26,8 @@ file they need.
   `content:unpaid` `tag:client-x`
 - Thumbnails, photo/audio/video/document metadata and document text, visible offline
 - Files inside zip, 7z, tar and ISO disc images, searchable without extracting
+- Files added, renamed or deleted on connected drives show up within seconds while the
+  app runs
 - Silent rescan when a known drive is plugged back in; enrichment resumes where it stopped
 - Easy on spinning hard drives: files are read in the order they sit on the disk
 - Tags, saved searches, a photo per drive, and a Ctrl+Shift+Space quick-search palette

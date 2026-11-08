@@ -35,16 +35,27 @@ export class AppStore {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private rebuildTimer: ReturnType<typeof setTimeout> | null = null;
   private bumpTimer: ReturnType<typeof setTimeout> | null = null;
+  private liveTimer: ReturnType<typeof setTimeout> | null = null;
 
   async init() {
     await this.refresh();
     await api.onVolumesChanged(() => this.scheduleRefresh());
+    await api.onCatalogChanged(() => this.bumpCatalog());
     await api.onScanProgress((p) => this.onScan(p));
     await api.onEnrichProgress((p) => this.onEnrich(p));
     await api.onToolDownload((p) => {
       this.download = p.done ? null : p;
       if (p.done && p.error) this.error = p.error;
     });
+  }
+
+  /** Live changes arrive every few seconds while files change: re-run views at most once a second. */
+  private bumpCatalog() {
+    if (this.liveTimer) return;
+    this.liveTimer = setTimeout(() => {
+      this.liveTimer = null;
+      this.catalogVersion += 1;
+    }, 1000);
   }
 
   scheduleRefresh() {

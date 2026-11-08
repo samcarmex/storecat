@@ -397,6 +397,13 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Remove one document by its key (see [`doc_key`]).
+    pub fn delete_doc(&self, key: u64) -> Result<()> {
+        let writer = self.writer.lock().map_err(|_| poisoned())?;
+        writer.delete_term(Term::from_field_u64(self.fields.doc_key, key));
+        Ok(())
+    }
+
     /// Remove the archive-entry documents that hang off a file.
     pub fn delete_children(&self, parent_key: u64) -> Result<()> {
         let writer = self.writer.lock().map_err(|_| poisoned())?;

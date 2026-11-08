@@ -93,6 +93,19 @@ The feature-complete build for 1.0, for testing on real drive collections.
   you actually have as chips, with counts. Tick one or several to narrow the list.
 - `ext: mp3`, `ext:.mp3`, `*.mp3`, `.mp3` and `type:mp3` all mean the same as `ext:mp3`.
 
+**Changes show up by themselves**
+- While Storecat runs it watches connected drives and catalogued folders. Files added,
+  changed, renamed or deleted outside the app appear in search within a few seconds,
+  without a rescan. Renamed files and folders keep their hashes, details and thumbnails;
+  new and changed files are enriched shortly after.
+- Storecat's own data folder and the package, cache and system folders scans skip are
+  ignored. Folder sizes are worked out again the next time the Storage view opens.
+- When the system loses track of changes (a very large burst of them), the folder
+  concerned is compared with the disk again, or the drive rescanned in the background.
+- Network shares are not watched: notifications from other computers don't arrive
+  reliably. They keep relying on rescans, as do changes made while Storecat was closed.
+- Settings → Behaviour → "Pick up changes while Storecat runs" turns it off.
+
 **Duplicates you can act on**
 - Columns sort by clicking their heading; the default is largest reclaimable space first.
 - Filters: a name or folder search, file type, a drive, and "Ready to clean" for groups

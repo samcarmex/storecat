@@ -11,6 +11,7 @@
   let info = $state<BuildInfo | null>(null);
   let ffmpeg = $state<FfmpegStatus | null>(null);
   let autoRescan = $state(true);
+  let liveWatch = $state(true);
   let autoEnrich = $state(true);
   let copyToDrive = $state(true);
   let hashMin = $state("1048576");
@@ -61,6 +62,7 @@
     info = await api.buildInfo();
     ffmpeg = await api.ffmpegStatus();
     autoRescan = (await api.getSetting("auto_rescan")) !== "false";
+    liveWatch = (await api.getSetting("live_watch")) !== "false";
     autoEnrich = (await api.getSetting("auto_enrich")) !== "false";
     copyToDrive = (await api.getSetting("copy_catalog_to_drive")) !== "false";
     hashMin = (await api.getSetting("hash_min_bytes")) ?? "1048576";
@@ -142,6 +144,13 @@
       <span>
         <strong>Rescan drives when they are plugged in</strong>
         <span class="muted">Silent, in the background. Skipped if the last scan was under 10 minutes ago.</span>
+      </span>
+    </label>
+    <label class="toggle">
+      <input type="checkbox" bind:checked={liveWatch} onchange={() => set("live_watch", String(liveWatch))} />
+      <span>
+        <strong>Pick up changes while Storecat runs</strong>
+        <span class="muted">Files added, renamed or deleted on connected drives show up in search within seconds. Network shares are left to rescans.</span>
       </span>
     </label>
     <label class="toggle">

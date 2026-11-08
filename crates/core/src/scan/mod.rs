@@ -118,6 +118,42 @@ pub fn walk(
     counters: &Counters,
     sink: &(dyn Fn(DirBatch) + Sync),
 ) -> Result<u64> {
+    walk_at(root, true, opts, counters, sink)
+}
+
+/// Like [`walk`], for a folder inside a volume: the volume-root exclusions don't apply at
+/// `root`. Ids and `rel_path` are relative to `root`, which itself gets dir id 0.
+pub fn walk_subtree(
+    root: &Path,
+    opts: &ScanOptions,
+    counters: &Counters,
+    sink: &(dyn Fn(DirBatch) + Sync),
+) -> Result<u64> {
+    walk_at(root, false, opts, counters, sink)
+}
+
+/// Whether a `/`-separated path relative to the volume root lies in (or is) a folder the
+/// scanner skips.
+pub fn is_excluded(rel: &str, opts: &ScanOptions) -> bool {
+    let mut parts = rel.split('/').filter(|p| !p.is_empty());
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    if opts.exclude_root_names.iter().any(|n| n == first) {
+        return true;
+    }
+    std::iter::once(first)
+        .chain(parts)
+        .any(|p| opts.exclude_names.iter().any(|n| n == p))
+}
+
+fn walk_at(
+    root: &Path,
+    volume_root: bool,
+    opts: &ScanOptions,
+    counters: &Counters,
+    sink: &(dyn Fn(DirBatch) + Sync),
+) -> Result<u64> {
     let started = Instant::now();
     let root_md = fs::metadata(root)?;
     if !root_md.is_dir() {
@@ -150,7 +186,7 @@ pub fn walk(
             String::new(),
             String::new(),
             root_mtime,
-            true,
+            volume_root,
         )
     });
     Ok(started.elapsed().as_millis() as u64)
@@ -295,26 +331,26 @@ fn visit<'s, 'a: 's>(
     }
 }
 
-fn to_unix(t: Option<SystemTime>) -> i64 {
+pub(crate) fn to_unix(t: Option<SystemTime>) -> i64 {
     t.and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
 
 #[cfg(windows)]
-fn attrs_of(md: &fs::Metadata) -> u32 {
+pub(crate) fn attrs_of(md: &fs::Metadata) -> u32 {
     use std::os::windows::fs::MetadataExt;
     md.file_attributes()
 }
 
 #[cfg(unix)]
-fn attrs_of(md: &fs::Metadata) -> u32 {
+pub(crate) fn attrs_of(md: &fs::Metadata) -> u32 {
     use std::os::unix::fs::MetadataExt;
     md.mode()
 }
 
 #[cfg(not(any(windows, unix)))]
-fn attrs_of(_md: &fs::Metadata) -> u32 {
+pub(crate) fn attrs_of(_md: &fs::Metadata) -> u32 {
     0
 }
 
