@@ -1,3 +1,8 @@
+<script lang="ts" module>
+  /** What the user opened and chose, kept while they visit other views. */
+  const remembered: { open: Set<string>; keep: Record<string, string> } = { open: new Set(), keep: {} };
+</script>
+
 <script lang="ts">
   import { api, ops, type Kind, type DupGroup, type DupMember, type DupPick, type DupScope, type DupSort, type DupSummary } from "../api";
   import type { AppStore } from "../store.svelte";
@@ -50,10 +55,13 @@
   /** Drives that have hashed files, the only ones that can hold duplicates. */
   const drives = $derived(store.volumes.filter((v) => (store.coverage[v.id]?.hashed ?? 0) > 0));
 
-  let open = $state<Set<string>>(new Set());
-  let verifying = $state<Set<string>>(new Set());
+  let open = $state<Set<string>>(new Set(remembered.open));
   /** Chosen copy to keep per group, "volume:file". */
-  let keep = $state<Record<string, string>>({});
+  let keep = $state<Record<string, string>>({ ...remembered.keep });
+  $effect(() => {
+    remembered.open = new Set(open);
+    remembered.keep = { ...keep };
+  });
   let selected = $state<Set<string>>(new Set());
   let working = $state(false);
   let confirmBulk = $state(false);
@@ -210,17 +218,21 @@
   }
 
   async function verify(g: DupGroup) {
-    verifying = new Set([...verifying, g.hash]);
+    // Show the bar straight away; progress events take over from here.
+    store.verifying[g.hash] = { hash: g.hash, bytes_done: 0, bytes_total: 0, files_done: 0, files_total: 0, current: "", done: false };
     try {
       const updated = await api.verifyGroup(g.hash);
       groups = groups.map((x) => (x.hash === g.hash ? { ...updated, user_copies: x.user_copies, waste: x.waste } : x));
     } catch (e) {
       error = String(e);
     } finally {
-      const next = new Set(verifying);
-      next.delete(g.hash);
-      verifying = next;
+      delete store.verifying[g.hash];
     }
+  }
+
+  function verifyPct(hash: string): number {
+    const p = store.verifying[hash];
+    return p && p.bytes_total > 0 ? Math.min(100, (p.bytes_done / p.bytes_total) * 100) : 0;
   }
 
   const anyHashed = $derived(Object.values(store.coverage).some((c) => c.hashed > 0));
@@ -350,7 +362,7 @@
             <span>{g.count} ×{#if g.user_copies < g.count}<span class="sub" title="Copies in app folders, left alone">{g.count - g.user_copies} app</span>{/if}</span>
             <span>{bytes(g.size)}</span>
             <span class="waste">{g.waste > 0 ? bytes(g.waste) : "—"}</span>
-            <span class="state" class:ok={g.verified}>{sent[g.hash] ? "in Operations" : g.verified ? "verified" : "quick hash"}</span>
+            <span class="state" class:ok={g.verified}>{sent[g.hash] ? "in Operations" : store.verifying[g.hash] ? `verifying ${Math.floor(verifyPct(g.hash))}%` : g.verified ? "verified" : "quick hash"}</span>
           </button>
         </div>
         {#if open.has(g.hash)}
@@ -384,12 +396,26 @@
                 <button class="btn small danger" disabled={working} onclick={() => recycle([g])}>
                   {working ? "Working…" : `Recycle ${gone.length} other ${gone.length === 1 ? "copy" : "copies"}`}
                 </button>
-                <span class="muted">Each copy is compared byte for byte with the one you keep before it goes to the Recycle Bin.</span>
+                <span class="muted">
+                  {g.verified
+                    ? "Verified: each copy is only checked to be unchanged before it goes to the Recycle Bin."
+                    : "Each copy is compared byte for byte with the one you keep before it goes to the Recycle Bin."}
+                </span>
               {/if}
-              {#if !g.verified && !sent[g.hash]}
+              {#if store.verifying[g.hash]}
+                {@const vp = store.verifying[g.hash]}
                 <span class="spacer"></span>
-                <button class="btn tiny" disabled={verifying.has(g.hash) || !g.members.some((m) => m.volume_online)} onclick={() => verify(g)}>
-                  {verifying.has(g.hash) ? "Hashing…" : "Verify now"}
+                <span class="verify" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.floor(verifyPct(g.hash))}>
+                  <span class="vline">
+                    <span>Verifying{vp.files_total > 1 ? ` copy ${Math.min(vp.files_done + 1, vp.files_total)} of ${vp.files_total}` : ""}</span>
+                    <span class="muted">{vp.bytes_total > 0 ? `${bytes(vp.bytes_done)} of ${bytes(vp.bytes_total)}` : "starting…"}</span>
+                  </span>
+                  <span class="vbar"><span style="width: {verifyPct(g.hash)}%"></span></span>
+                </span>
+              {:else if !g.verified && !sent[g.hash]}
+                <span class="spacer"></span>
+                <button class="btn tiny" disabled={!g.members.some((m) => m.volume_online)} onclick={() => verify(g)} title="Read every connected copy in full to prove they are identical">
+                  Verify now
                 </button>
               {/if}
             </li>
@@ -435,6 +461,31 @@
   }
   .spacer {
     flex: 1;
+  }
+  .verify {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 260px;
+    font-size: 12px;
+  }
+  .vline {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .vbar {
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+  }
+  .vbar span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.3s;
   }
   .filters {
     display: flex;

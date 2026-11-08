@@ -27,6 +27,21 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl Error {
+    /// Something else is writing the catalogue right now (a scan, or enrichment holding the
+    /// database): worth trying again shortly rather than treating as a failure.
+    pub fn is_busy(&self) -> bool {
+        match self {
+            Error::Busy => true,
+            Error::Sqlite(e) => matches!(
+                e.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            ),
+            _ => false,
+        }
+    }
+}
+
 impl From<String> for Error {
     fn from(s: String) -> Self {
         Error::Other(s)

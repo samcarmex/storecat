@@ -148,7 +148,8 @@ fn apply_profiles(vols: &mut [DetectedVolume]) {
             v.bus = p.bus.clone();
             v.model = p.model.clone();
             v.health = p.health;
-            if let Some(m) = p.media {
+            // USB enclosures often don't say whether the disk spins; the name usually does.
+            if let Some(m) = p.media.or_else(|| media_from_model(&p.model)) {
                 // NVMe and optical are more specific than the SSD/HDD guess.
                 if v.media_type == MediaType::Unknown
                     || matches!(m, MediaType::Nvme | MediaType::Optical)
@@ -157,6 +158,23 @@ fn apply_profiles(vols: &mut [DetectedVolume]) {
                 }
             }
         }
+    }
+}
+
+/// SSD or HDD from a drive's model name, for enclosures that report neither ("Seagate
+/// Expansion HDD", "Samsung Portable SSD T7").
+fn media_from_model(model: &str) -> Option<MediaType> {
+    let words: Vec<String> = model
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .map(|w| w.to_ascii_uppercase())
+        .collect();
+    let has = |w: &str| words.iter().any(|x| x == w);
+    if has("SSD") || has("NVME") {
+        Some(MediaType::Ssd)
+    } else if has("HDD") {
+        Some(MediaType::Hdd)
+    } else {
+        None
     }
 }
 
@@ -316,6 +334,24 @@ fn parse_kv(text: &str, sep: char) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_from_model_names() {
+        assert_eq!(
+            media_from_model("Seagate Expansion HDD"),
+            Some(MediaType::Hdd)
+        );
+        assert_eq!(
+            media_from_model("Samsung Portable SSD T7"),
+            Some(MediaType::Ssd)
+        );
+        assert_eq!(
+            media_from_model("WD_BLACK SN850X NVMe"),
+            Some(MediaType::Ssd)
+        );
+        assert_eq!(media_from_model("ST8000DM004-2CX188"), None);
+        assert_eq!(media_from_model("SSDPEKKW512G8"), None);
+    }
 
     #[test]
     fn detects_at_least_the_system_volume() {

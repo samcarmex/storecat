@@ -577,6 +577,19 @@ pub struct EnrichStats {
     pub paused: bool,
 }
 
+/// A duplicate group being hashed in full ("Verify"), for its progress bar.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VerifyProgress {
+    pub hash: String,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub files_done: u64,
+    pub files_total: u64,
+    /// Name of the copy being read.
+    pub current: String,
+    pub done: bool,
+}
+
 /// Per-volume enrichment coverage, for the drive card.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EnrichCoverage {

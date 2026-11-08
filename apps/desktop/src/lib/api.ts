@@ -270,6 +270,17 @@ export interface DupMember {
   app_managed: boolean;
 }
 
+/** A duplicate group being hashed in full. */
+export interface VerifyProgress {
+  hash: string;
+  bytes_done: number;
+  bytes_total: number;
+  files_done: number;
+  files_total: number;
+  current: string;
+  done: boolean;
+}
+
 export interface DupGroup {
   hash: string;
   size: number;
@@ -426,6 +437,7 @@ export const api = {
   extensionCounts: (kind: Kind) => call<ExtCount[]>("extension_counts", { kind }, []),
   duplicateSummary: () => call<DupSummary>("duplicate_summary", {}, { groups: 0, files: 0, waste: 0 }),
   verifyGroup: (hash: string) => invoke<DupGroup>("verify_group", { hash }),
+  verifying: () => call<VerifyProgress[]>("verifying", {}, []),
 
   ffmpegStatus: () =>
     call<FfmpegStatus>("ffmpeg_status", {}, { available: false, ffmpeg: null, ffprobe: null, version: null }),
@@ -448,6 +460,10 @@ export const api = {
   onVolumesChanged(handler: () => void): Promise<UnlistenFn> {
     if (!isTauri()) return Promise.resolve(() => {});
     return listen("volumes-changed", () => handler());
+  },
+  onVerifyProgress(handler: (p: VerifyProgress) => void): Promise<UnlistenFn> {
+    if (!isTauri()) return Promise.resolve(() => {});
+    return listen<VerifyProgress>("verify-progress", (e) => handler(e.payload));
   },
   /** Files changed on a watched drive and the catalogue was updated in place. */
   onCatalogChanged(handler: (volumeId: number) => void): Promise<UnlistenFn> {

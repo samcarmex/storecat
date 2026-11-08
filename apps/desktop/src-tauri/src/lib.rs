@@ -153,6 +153,7 @@ pub fn run() {
             commands::extension_counts,
             commands::duplicate_summary,
             commands::verify_group,
+            commands::verifying,
             commands::ffmpeg_status,
             commands::download_ffmpeg,
             commands::export_volume,

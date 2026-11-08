@@ -7,7 +7,9 @@ The feature-complete build for 1.0, for testing on real drive collections.
 **Storage smarts**
 - Drive profiles: SSD, NVMe or spinning disk, connection (USB, SATA, NVMe, network,
   optical), model and the health Windows reports, refreshed whenever a drive connects.
-  Catalogued folders inherit their drive's profile.
+  Catalogued folders inherit their drive's profile. USB enclosures that don't say whether
+  their disk spins are recognised from Windows' own disk list or the model name ("Seagate
+  Expansion HDD"), so they get the hard-drive reading order.
 - Storage view with a treemap per drive, coloured by content type, with drill-down, and a
   content-type breakdown.
 - Suggestions inbox: rescue copies for failing drives, nearly-full drives, the Desktop +
@@ -98,17 +100,24 @@ The feature-complete build for 1.0, for testing on real drive collections.
   changed, renamed or deleted outside the app appear in search within a few seconds,
   without a rescan. Renamed files and folders keep their hashes, details and thumbnails;
   new and changed files are enriched shortly after.
-- Storecat's own data folder and the package, cache and system folders scans skip are
-  ignored. Folder sizes are worked out again the next time the Storage view opens.
-- When the system loses track of changes (a very large burst of them), the folder
-  concerned is compared with the disk again, or the drive rescanned in the background,
-  at most once every ten minutes per drive.
+- Storecat's own data folder, the folders scans skip, and package, cache and system
+  folders (browser caches, package stores, `.git`) are ignored; rescans keep those current. Folder sizes are worked out again the next time the Storage view opens.
+- When the system loses track of changes (a flood of tens of thousands at once), the
+  folder concerned is compared with the disk again, or the drive rescanned in the
+  background, at most once every ten minutes per drive. Changes that arrive while
+  enrichment is writing the catalogue wait their turn instead of forcing a rescan.
 - Network shares are not watched: notifications from other computers don't arrive
   reliably. They keep relying on rescans, as do changes made while Storecat was closed.
 - Settings → Behaviour → "Pick up changes while Storecat runs" turns it off.
 
 **Duplicates you can act on**
 - Columns sort by clicking their heading; the default is largest reclaimable space first.
+- "Verify now" shows a progress bar (which copy, how much read) that is still there after
+  visiting another view, and copies hashed in full before are not read again. Open groups
+  and the copy chosen to keep are remembered too.
+- Recycling copies that a verify already proved identical only checks they haven't
+  changed since, instead of reading every copy again. Unverified copies are still compared
+  byte for byte, and jobs now show progress through a large file instead of sitting at 0%.
 - Filters: a name or folder search, file type, a drive, and "Ready to clean" for groups
   whose copy to keep and an extra copy are both connected. The totals follow the filters.
 - Every group offers the copy to keep (outside Temp and Downloads, not a "(1)" copy) and

@@ -37,8 +37,12 @@ const SYNC_EVERY: Duration = Duration::from_secs(5);
 const RETRY_WATCH: Duration = Duration::from_secs(300);
 /// New files are enriched in one go, at most this often per volume.
 const ENRICH_EVERY: Duration = Duration::from_secs(60);
-/// On Windows a burst this large may have overflowed the change buffer unnoticed.
-const BURST_EVENTS: usize = 500;
+/// On Windows a flood this large and fast may have overflowed the change buffer unnoticed
+/// (the `notify` crate doesn't pass the overflow on). Busy system drives easily see a few
+/// thousand changes in a few seconds from browsers, builds and installers, which the buffer
+/// keeps up with; an overflow takes hundreds landing within milliseconds.
+const FLOOD_EVENTS: usize = 5_000;
+const FLOOD_PER_SEC: f64 = 1_000.0;
 /// A whole drive is rescanned for live changes at most this long after its last scan; a
 /// request in between waits (changes keep being applied meanwhile). A busy system drive
 /// can overflow the change buffer often, and each rescan reads every file entry.
@@ -88,6 +92,15 @@ impl Pending {
 
     fn is_empty(&self) -> bool {
         self.renames.is_empty() && self.rescans.is_empty() && self.paths.is_empty()
+    }
+
+    /// Whether the changes arrived in a flood that may have overflowed the OS's buffer.
+    fn flooded(&self) -> bool {
+        let (Some(first), Some(last)) = (self.first, self.last) else {
+            return false;
+        };
+        let secs = last.duration_since(first).as_secs_f64().max(1.0);
+        self.events >= FLOOD_EVENTS && self.events as f64 / secs >= FLOOD_PER_SEC
     }
 }
 
@@ -417,7 +430,7 @@ impl Live {
             if pend.is_empty() {
                 continue;
             }
-            if cfg!(windows) && pend.events >= BURST_EVENTS {
+            if cfg!(windows) && pend.flooded() {
                 // The buffer may have overflowed (Windows drops the batch, or the whole
                 // watch, without saying so): watch again, and compare the area of the
                 // burst with the disk.
@@ -454,8 +467,8 @@ impl Live {
                         self.enrich_wanted.insert(id);
                     }
                 }
-                Err(Error::Busy) => {
-                    // A scan holds the catalogue: try again once it's done.
+                Err(e) if e.is_busy() => {
+                    // A scan or enrichment holds the catalogue: try again shortly.
                     self.requeue(id, pend, now, false);
                 }
                 Err(Error::VolumeOffline) | Err(Error::VolumeNotFound(_)) => {}
@@ -473,11 +486,13 @@ impl Live {
 
     /// Put changes back in front of anything that arrived since.
     fn requeue(&mut self, id: VolumeId, mut old: Pending, now: Instant, failed: bool) {
+        // Only events that arrive from now on count towards a flood: these were judged.
+        old.events = 0;
         if let Some(newer) = self.pending.remove(&id) {
             old.renames.extend(newer.renames);
             old.rescans.extend(newer.rescans);
             old.paths.extend(newer.paths);
-            old.events += newer.events;
+            old.events = newer.events;
         }
         if failed {
             old.failures += 1;
@@ -604,6 +619,24 @@ fn strip_verbatim(p: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_fast_floods_count_as_overflow() {
+        let start = Instant::now();
+        let batch = |events: usize, secs: u64| Pending {
+            events,
+            first: Some(start),
+            last: Some(start + Duration::from_secs(secs)),
+            ..Default::default()
+        };
+        // A busy system drive: thousands of changes over a few seconds.
+        assert!(!batch(4_700, 10).flooded());
+        assert!(!batch(4_999, 1).flooded());
+        // Tens of thousands at once.
+        assert!(batch(20_000, 2).flooded());
+        assert!(batch(6_000, 0).flooded());
+        assert!(!Pending::default().flooded());
+    }
 
     #[test]
     fn changes_put_renames_first_and_fold_paths_into_rescans() {

@@ -77,7 +77,8 @@ enum IndexOp {
 impl Catalog {
     /// The path inside a volume (`/`-separated, relative to `root`) that a live change
     /// refers to, or `None` when it should be ignored: outside the volume, Storecat's own
-    /// data folder or drive copy, or a folder the scanner skips.
+    /// data folder or drive copy, a folder the scanner skips, or a package, cache or system
+    /// folder.
     pub fn live_rel_path(&self, root: &Path, abs: &Path) -> Option<String> {
         if is_under(abs, &self.dirs.root) {
             return None;
@@ -92,8 +93,12 @@ impl Catalog {
             }
         }
         let rel = parts.join("/");
+        // Package, cache and system folders change constantly (browser caches, package
+        // stores, `.git`) and hold nothing people search for; rescans keep them current.
+        let system_root = crate::paths::is_system_drive(&root.to_string_lossy());
         if parts.first().map(|p| p == DRIVE_COPY_DIR).unwrap_or(false)
             || scan::is_excluded(&rel, &ScanOptions::default())
+            || crate::enrich::plan::is_bulk_path(&rel, system_root)
         {
             return None;
         }
@@ -1184,6 +1189,13 @@ mod tests {
             Some("docs/a.txt")
         );
         assert_eq!(fx.cat.live_rel_path(root, &fx.p("docs/.git/HEAD")), None);
+        // Caches and package stores churn all day; rescans look after them.
+        let cache = fx.p("AppData/Local/Browser/User Data/Default/Cache/Cache_Data/f_0001");
+        assert_eq!(fx.cat.live_rel_path(root, &cache), None);
+        assert_eq!(
+            fx.cat.live_rel_path(root, &fx.p(".cargo/registry/x.crate")),
+            None
+        );
         assert_eq!(fx.cat.live_rel_path(root, Path::new("/elsewhere/x")), None);
     }
 

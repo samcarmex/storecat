@@ -183,6 +183,9 @@ pub(crate) fn profiles(mounts: &[&str]) -> Vec<DriveProfile> {
                 if p.bus.is_empty() {
                     p.bus = d.bus.to_lowercase();
                 }
+                if p.media.is_none() {
+                    p.media = d.media;
+                }
             }
         }
     }
@@ -347,13 +350,14 @@ struct PhysicalDisk {
     number: u32,
     name: String,
     bus: String,
+    media: Option<MediaType>,
     health: Health,
 }
 
 /// `Get-PhysicalDisk` through PowerShell: the OS's own S.M.A.R.T. summary per disk.
 /// Runs hidden, with a timeout, at most once per new drive (results are cached).
 fn physical_disks() -> Vec<PhysicalDisk> {
-    let script = "Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,BusType,HealthStatus | ConvertTo-Json -Compress";
+    let script = "Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,BusType,MediaType,HealthStatus | ConvertTo-Json -Compress";
     let Ok(mut child) = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .stdin(Stdio::null())
@@ -412,10 +416,17 @@ fn parse_physical_disks(json: &str) -> Vec<PhysicalDisk> {
                 serde_json::Value::String(s) => Health::parse(s),
                 _ => Health::Unknown,
             };
+            // "HDD", "SSD", "SCM" or "Unspecified" (older PowerShell: 3, 4, 5 or 0).
+            let media = match text(o, "MediaType").as_str() {
+                "HDD" | "3" => Some(MediaType::Hdd),
+                "SSD" | "SCM" | "4" | "5" => Some(MediaType::Ssd),
+                _ => None,
+            };
             Some(PhysicalDisk {
                 number,
                 name: text(o, "FriendlyName"),
                 bus: text(o, "BusType"),
+                media,
                 health,
             })
         })
@@ -436,6 +447,15 @@ mod tests {
         let d = parse_physical_disks(many);
         assert_eq!(d[0].health, Health::Warning);
         assert_eq!(d[1].health, Health::Unhealthy);
+    }
+
+    #[test]
+    fn reads_media_type_when_windows_knows_it() {
+        let json = r#"[{"DeviceId":"1","FriendlyName":"Seagate Expansion HDD","BusType":"USB","MediaType":"Unspecified","HealthStatus":"Healthy"},{"DeviceId":"0","MediaType":"SSD"},{"DeviceId":"2","MediaType":3}]"#;
+        let d = parse_physical_disks(json);
+        assert_eq!(d[0].media, None);
+        assert_eq!(d[1].media, Some(MediaType::Ssd));
+        assert_eq!(d[2].media, Some(MediaType::Hdd));
     }
 
     #[test]

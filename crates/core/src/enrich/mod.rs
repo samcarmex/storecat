@@ -104,6 +104,15 @@ pub fn quick_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> {
 
 /// Full-content BLAKE3, streamed.
 pub fn full_hash(path: &Path) -> std::io::Result<[u8; 32]> {
+    full_hash_with(path, &AtomicBool::new(false), &mut |_| {})
+}
+
+/// [`full_hash`], reporting bytes read and stopping when `cancel` is set.
+pub fn full_hash_with(
+    path: &Path,
+    cancel: &AtomicBool,
+    on_bytes: &mut dyn FnMut(u64),
+) -> std::io::Result<[u8; 32]> {
     let mut f = File::open(path)?;
     let mut h = blake3::Hasher::new();
     let mut buf = vec![0u8; 1024 * 1024];
@@ -113,6 +122,10 @@ pub fn full_hash(path: &Path) -> std::io::Result<[u8; 32]> {
             break;
         }
         h.update(&buf[..n]);
+        on_bytes(n as u64);
+        if cancel.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other("cancelled"));
+        }
     }
     Ok(*h.finalize().as_bytes())
 }
@@ -484,6 +497,17 @@ impl Catalog {
 
     /// Compute full hashes for every connected member of a duplicate group and report back.
     pub fn verify_group(&self, hash_hex: &str) -> Result<DupGroup> {
+        self.verify_group_with(hash_hex, &AtomicBool::new(false), &|_| {})
+    }
+
+    /// Hash every connected copy in a duplicate group in full, reporting progress. Copies
+    /// hashed in full before are not read again: a file that changes loses its hashes.
+    pub fn verify_group_with(
+        &self,
+        hash_hex: &str,
+        cancel: &AtomicBool,
+        progress: &dyn Fn(&VerifyProgress),
+    ) -> Result<DupGroup> {
         let hash = unhex(hash_hex).ok_or_else(|| Error::Other("bad hash".into()))?;
         let members = self
             .dupes
@@ -492,18 +516,55 @@ impl Catalog {
             .members(&hash)?;
         let volumes = self.volumes()?;
         let now = now_unix();
+        // What needs reading: connected copies without a full hash.
+        let mut todo: Vec<(VolumeId, i64, PathBuf, u64)> = Vec::new();
         for (vid, fid) in &members {
             let Some(v) = volumes.iter().find(|v| v.id == *vid) else {
                 continue;
             };
             let Some(mount) = &v.mount_path else { continue };
-            let db = VolumeDb::open_rw(&self.dirs.volume_db(*vid))?;
+            let db = VolumeDb::open(&self.dirs.volume_db(*vid))?;
             let Some(f) = db.file(*fid)? else { continue };
-            let path = PathBuf::from(join_abs(mount, &f.path, &f.name));
-            if let Ok(full) = full_hash(&path) {
-                db.set_full_hash(*fid, &full, now)?;
+            if db.hashes(*fid)?.1.is_some() {
+                continue;
             }
+            let path = PathBuf::from(join_abs(mount, &f.path, &f.name));
+            todo.push((*vid, *fid, path, f.size));
         }
+        let mut p = VerifyProgress {
+            hash: hash_hex.to_string(),
+            bytes_total: todo.iter().map(|t| t.3).sum(),
+            files_total: todo.len() as u64,
+            ..Default::default()
+        };
+        progress(&p);
+        let mut last = Instant::now();
+        for (vid, fid, path, size) in &todo {
+            p.current = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            progress(&p);
+            let start = p.bytes_done;
+            let read = full_hash_with(path, cancel, &mut |n| {
+                p.bytes_done += n;
+                if last.elapsed() >= Duration::from_millis(200) {
+                    last = Instant::now();
+                    progress(&p);
+                }
+            });
+            if cancel.load(Ordering::Relaxed) {
+                return Err(Error::Other("cancelled".into()));
+            }
+            if let Ok(full) = read {
+                VolumeDb::open_rw(&self.dirs.volume_db(*vid))?.set_full_hash(*fid, &full, now)?;
+            }
+            p.bytes_done = start + size;
+            p.files_done += 1;
+        }
+        p.current.clear();
+        p.done = true;
+        progress(&p);
         self.duplicate_group(&hash, None)?
             .ok_or_else(|| Error::Other("group vanished".into()))
     }

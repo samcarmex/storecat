@@ -24,6 +24,11 @@ const BUF: usize = 1024 * 1024;
 /// Delete check: the file must be byte-for-byte identical to the file at the path that
 /// follows (the copy being kept), which must still exist.
 pub const CHECK_SAME_AS: &str = "check:same-as:";
+/// Delete check for a copy already proven identical to the one being kept (both fully
+/// hashed when the group was verified): `size|keep mtime|copy mtime|keep path`. If both
+/// files still have that size and modification time, nothing is read again; otherwise it
+/// falls back to the byte-for-byte check.
+pub const CHECK_VERIFIED: &str = "check:verified:";
 /// Delete check: the file must be a macOS AppleDouble companion (`._name`).
 pub const CHECK_APPLEDOUBLE: &str = "check:appledouble";
 const TEMP_SUFFIX: &str = ".storecat-part";
@@ -202,6 +207,15 @@ fn copy_hashed(
 }
 
 fn hash_file(path: &Path, cancel: &AtomicBool) -> std::io::Result<[u8; 32]> {
+    hash_file_with(path, cancel, &mut |_| {})
+}
+
+/// [`hash_file`], reporting the bytes read as it goes.
+fn hash_file_with(
+    path: &Path,
+    cancel: &AtomicBool,
+    on_bytes: &mut dyn FnMut(u64),
+) -> std::io::Result<[u8; 32]> {
     let mut f = File::open(path)?;
     let mut h = blake3::Hasher::new();
     let mut buf = vec![0u8; BUF];
@@ -214,8 +228,18 @@ fn hash_file(path: &Path, cancel: &AtomicBool) -> std::io::Result<[u8; 32]> {
             break;
         }
         h.update(&buf[..n]);
+        on_bytes(n as u64);
     }
     Ok(*h.finalize().as_bytes())
+}
+
+/// Modification time in whole seconds, as the catalogue stores it.
+fn mtime_secs(md: &fs::Metadata) -> i64 {
+    md.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(-1)
 }
 
 /// The keeper's hash, remembered between the items of one duplicate group.
@@ -223,7 +247,13 @@ static KEEPER_HASH: std::sync::Mutex<Option<(PathBuf, u64, [u8; 32])>> =
     std::sync::Mutex::new(None);
 
 /// Refuse to delete a file that no longer meets the condition it was planned under.
-fn delete_check(src: &Path, check: &str, cancel: &AtomicBool) -> Result<()> {
+/// `on_bytes` hears progress through the file being checked, scaled to its size.
+fn delete_check(
+    src: &Path,
+    check: &str,
+    cancel: &AtomicBool,
+    on_bytes: &mut dyn FnMut(u64),
+) -> Result<()> {
     let refuse = |why: &str| Err(Error::Other(format!("left in place: {why}")));
     if check.is_empty() {
         return Ok(());
@@ -239,10 +269,45 @@ fn delete_check(src: &Path, check: &str, cancel: &AtomicBool) -> Result<()> {
             refuse("not a macOS metadata file")
         };
     }
+    if let Some(rest) = check.strip_prefix(CHECK_VERIFIED) {
+        let mut parts = rest.splitn(4, '|');
+        let (Some(size), Some(keep_mtime), Some(src_mtime), Some(keep)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return refuse("unknown check");
+        };
+        let keep = Path::new(keep);
+        if keep == src {
+            return refuse("it is the copy being kept");
+        }
+        let unchanged = |p: &Path, mtime: &str| {
+            fs::metadata(p).is_ok_and(|md| {
+                Some(md.len()) == size.parse().ok()
+                    && mtime
+                        .parse::<i64>()
+                        .is_ok_and(|m| (mtime_secs(&md) - m).abs() <= 2)
+            })
+        };
+        // Both still as they were when they were hashed in full and found identical.
+        if unchanged(keep, keep_mtime) && unchanged(src, src_mtime) {
+            return Ok(());
+        }
+        return same_as(src, keep, cancel, on_bytes);
+    }
     let Some(keep) = check.strip_prefix(CHECK_SAME_AS) else {
         return refuse("unknown check");
     };
-    let keep = Path::new(keep);
+    same_as(src, Path::new(keep), cancel, on_bytes)
+}
+
+/// The byte-for-byte check: `src` must match `keep`, which must still exist.
+fn same_as(
+    src: &Path,
+    keep: &Path,
+    cancel: &AtomicBool,
+    on_bytes: &mut dyn FnMut(u64),
+) -> Result<()> {
+    let refuse = |why: &str| Err(Error::Other(format!("left in place: {why}")));
     if keep == src {
         return refuse("it is the copy being kept");
     }
@@ -253,24 +318,31 @@ fn delete_check(src: &Path, check: &str, cancel: &AtomicBool) -> Result<()> {
         return refuse("it differs from the copy being kept");
     }
     let cancelled = |e: std::io::Error| Error::Other(e.to_string());
-    let keep_hash = {
-        let cached = KEEPER_HASH
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .filter(|(p, len, _)| p == keep && *len == km.len())
-            .map(|(_, _, h)| h);
-        match cached {
-            Some(h) => h,
-            None => {
-                let h = hash_file(keep, cancel).map_err(cancelled)?;
-                *KEEPER_HASH.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some((keep.to_path_buf(), km.len(), h));
-                h
-            }
+    let cached = KEEPER_HASH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .filter(|(p, len, _)| p == keep && *len == km.len())
+        .map(|(_, _, h)| h);
+    // Progress covers the file being checked; when the keeper has to be read too, each
+    // byte read counts half.
+    let keep_hash = match cached {
+        Some(h) => h,
+        None => {
+            let mut half = |n: u64| on_bytes(n / 2);
+            let h = hash_file_with(keep, cancel, &mut half).map_err(cancelled)?;
+            *KEEPER_HASH.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((keep.to_path_buf(), km.len(), h));
+            h
         }
     };
-    if hash_file(src, cancel).map_err(cancelled)? != keep_hash {
+    let src_hash = if cached.is_some() {
+        hash_file_with(src, cancel, on_bytes)
+    } else {
+        hash_file_with(src, cancel, &mut |n: u64| on_bytes(n / 2))
+    }
+    .map_err(cancelled)?;
+    if src_hash != keep_hash {
         return refuse("it differs from the copy being kept");
     }
     Ok(())
@@ -609,11 +681,22 @@ impl Catalog {
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_default();
+                // Progress through the file in hand counts too, so a single large file
+                // doesn't sit at 0% until it is finished.
+                let mut item_bytes = 0u64;
                 let outcome = self.run_item(job, &item, cancel, &mut |n| {
                     bytes_session += n;
+                    item_bytes += n;
                     if last_report.elapsed().as_millis() >= 250 {
                         last_report = Instant::now();
-                        report(&name, done_files, done_bytes, failed, bytes_session);
+                        let in_hand = item_bytes.min(item.size);
+                        report(
+                            &name,
+                            done_files,
+                            done_bytes + in_hand,
+                            failed,
+                            bytes_session,
+                        );
                     }
                 });
                 match outcome {
@@ -709,7 +792,7 @@ impl Catalog {
                 master().set_item_status(item.id, ItemStatus::Done, None, None)?;
                 return Ok(ItemStatus::Done);
             }
-            delete_check(src, &item.dest, cancel)?;
+            delete_check(src, &item.dest, cancel, on_bytes)?;
             trash::delete(src).map_err(|e| Error::Other(format!("recycle bin: {e}")))?;
             master().set_item_status(item.id, ItemStatus::Done, None, None)?;
             return Ok(ItemStatus::Done);
@@ -818,7 +901,8 @@ impl Catalog {
     /// A delete job that keeps one copy in each duplicate group and recycles the other
     /// copies of yours. Copies in app-managed folders and on disconnected drives are left
     /// alone. Each deletion re-checks, byte for byte, that the file still matches the copy
-    /// being kept, so groups found by quick hash need no separate verify step.
+    /// being kept, so groups found by quick hash need no separate verify step. Copies a
+    /// verify already proved identical are only checked to be unchanged since.
     pub fn duplicate_cleanup_spec(&self, picks: &[DupPick]) -> Result<JobSpec> {
         let volumes = self.volumes()?;
         let mount_of = |vid: VolumeId| -> Option<&str> {
@@ -864,7 +948,15 @@ impl Catalog {
                     continue;
                 };
                 sources.push(crate::catalog::join_abs(mount, &m.path, &m.name));
-                checks.push(format!("{CHECK_SAME_AS}{keep_path}"));
+                let proven = keeper.full_hash.is_some() && m.full_hash == keeper.full_hash;
+                checks.push(if proven {
+                    format!(
+                        "{CHECK_VERIFIED}{}|{}|{}|{keep_path}",
+                        group.size, keeper.mtime, m.mtime
+                    )
+                } else {
+                    format!("{CHECK_SAME_AS}{keep_path}")
+                });
             }
             if sources.len() > before {
                 groups += 1;
@@ -1042,8 +1134,45 @@ mod tests {
         let keep_path = t.join("Photos/beach.bin");
         for (src, check) in spec.sources.iter().zip(&spec.checks) {
             assert_eq!(check.strip_prefix(CHECK_SAME_AS).unwrap(), expected_keep);
-            assert!(delete_check(Path::new(src), check, &AtomicBool::new(false)).is_ok());
+            assert!(
+                delete_check(Path::new(src), check, &AtomicBool::new(false), &mut |_| {}).is_ok()
+            );
         }
+
+        // Once the group is verified, copies proven identical aren't read a second time...
+        cat.verify_group(&g.hash).unwrap();
+        let pick = DupPick {
+            hash: g.hash.clone(),
+            keep_volume_id: keep.0,
+            keep_file_id: keep.1,
+        };
+        let spec = cat.duplicate_cleanup_spec(&[pick]).unwrap();
+        for (src, check) in spec.sources.iter().zip(&spec.checks) {
+            assert!(check.starts_with(CHECK_VERIFIED), "{check}");
+            let mut read = 0u64;
+            let no = AtomicBool::new(false);
+            assert!(delete_check(Path::new(src), check, &no, &mut |n| read += n).is_ok());
+            assert_eq!(read, 0, "nothing re-read for {src}");
+        }
+        // ...but one that changed since is compared byte for byte again, and kept.
+        let src0 = PathBuf::from(&spec.sources[0]);
+        let mut edited = blob.clone();
+        edited[99] ^= 0xff;
+        fs::write(&src0, &edited).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&src0)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+        let mut read = 0u64;
+        let e = delete_check(&src0, &spec.checks[0], &AtomicBool::new(false), &mut |n| {
+            read += n
+        })
+        .unwrap_err();
+        assert!(e.to_string().contains("differs"), "{e}");
+        assert!(read > 0);
+        fs::write(&src0, &blob).unwrap();
 
         // A copy that changed since it was catalogued is left in place.
         let temp_copy = t.join("AppData/Local/Temp/wetransfer/beach.bin");
@@ -1051,12 +1180,12 @@ mod tests {
         changed[1234] ^= 0xff;
         fs::write(&temp_copy, &changed).unwrap();
         let check = format!("{CHECK_SAME_AS}{}", keep_path.display());
-        let e = delete_check(&temp_copy, &check, &AtomicBool::new(false)).unwrap_err();
+        let e = delete_check(&temp_copy, &check, &AtomicBool::new(false), &mut |_| {}).unwrap_err();
         assert!(e.to_string().contains("left in place"), "{e}");
         // So is the keeper itself, and anything when the keeper has gone.
-        assert!(delete_check(&keep_path, &check, &AtomicBool::new(false)).is_err());
+        assert!(delete_check(&keep_path, &check, &AtomicBool::new(false), &mut |_| {}).is_err());
         let gone = format!("{CHECK_SAME_AS}{}", t.join("nope.bin").display());
-        assert!(delete_check(&temp_copy, &gone, &AtomicBool::new(false)).is_err());
+        assert!(delete_check(&temp_copy, &gone, &AtomicBool::new(false), &mut |_| {}).is_err());
     }
 
     #[test]
@@ -1069,9 +1198,12 @@ mod tests {
         fs::write(&real, bytes).unwrap();
         fs::write(&fake, b"just text").unwrap();
         let no = AtomicBool::new(false);
-        assert!(delete_check(&real, CHECK_APPLEDOUBLE, &no).is_ok());
-        assert!(delete_check(&fake, CHECK_APPLEDOUBLE, &no).is_err());
-        assert!(delete_check(&fake, "", &no).is_ok(), "no check, no refusal");
+        assert!(delete_check(&real, CHECK_APPLEDOUBLE, &no, &mut |_| {}).is_ok());
+        assert!(delete_check(&fake, CHECK_APPLEDOUBLE, &no, &mut |_| {}).is_err());
+        assert!(
+            delete_check(&fake, "", &no, &mut |_| {}).is_ok(),
+            "no check, no refusal"
+        );
     }
 
     #[test]

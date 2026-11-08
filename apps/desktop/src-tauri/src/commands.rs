@@ -10,8 +10,8 @@ use storecat_core::{
     settings, Catalog, CatalogStats, DetectedVolume, DownloadProgress, DupGroup, DupPage, DupPick,
     DupQuery, DupSummary, EnrichCoverage, EnrichOptions, EnrichPhase, EnrichProgress, ExtCount,
     FfmpegStatus, FolderTree, ItemDetail, ItemStatus, ItemType, Job, JobItem, JobKind, JobPlan,
-    JobSpec, Kind, KindBytes, SavedSearch, ScanOptions, SearchOptions, SearchResponse, Tag, Volume,
-    VolumePatch,
+    JobSpec, Kind, KindBytes, SavedSearch, ScanOptions, SearchOptions, SearchResponse, Tag,
+    VerifyProgress, Volume, VolumePatch,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -384,12 +384,64 @@ pub fn duplicate_summary(state: State<AppState>) -> CmdResult<DupSummary> {
     state.catalog.duplicate_summary().map_err(err)
 }
 
+/// Duplicate groups being hashed in full, so the Duplicates view can show them again after
+/// the user switches away and back.
+static VERIFYING: Mutex<Vec<VerifyProgress>> = Mutex::new(Vec::new());
+
+#[tauri::command]
+pub fn verifying() -> Vec<VerifyProgress> {
+    VERIFYING.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Hash a duplicate group in full, sending `verify-progress` events as it reads.
 #[tauri::command]
 pub async fn verify_group(app: AppHandle, hash: String) -> CmdResult<DupGroup> {
+    {
+        let mut v = VERIFYING.lock().unwrap_or_else(|e| e.into_inner());
+        if v.iter().any(|p| p.hash == hash) {
+            return Err("this group is already being verified".into());
+        }
+        v.push(VerifyProgress {
+            hash: hash.clone(),
+            ..Default::default()
+        });
+    }
     let catalog = Arc::clone(&app.state::<AppState>().catalog);
-    tauri::async_runtime::spawn_blocking(move || catalog.verify_group(&hash).map_err(err))
-        .await
-        .map_err(err)?
+    let (a, h) = (app.clone(), hash.clone());
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        catalog
+            .verify_group_with(&h, &cancel, &|p| {
+                if let Some(slot) = VERIFYING
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter_mut()
+                    .find(|x| x.hash == p.hash)
+                {
+                    *slot = p.clone();
+                }
+                let _ = a.emit("verify-progress", p);
+            })
+            .map_err(err)
+    })
+    .await
+    .map_err(err)
+    .and_then(|r| r);
+    VERIFYING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|p| p.hash != hash);
+    if result.is_err() {
+        let _ = app.emit(
+            "verify-progress",
+            VerifyProgress {
+                hash,
+                done: true,
+                ..Default::default()
+            },
+        );
+    }
+    result
 }
 
 // ----- tools, settings, export/import ---------------------------------------------------

@@ -10,6 +10,7 @@ import {
   type EnrichCoverage,
   type EnrichProgress,
   type ScanProgress,
+  type VerifyProgress,
   type Volume,
 } from "./api";
 
@@ -26,6 +27,9 @@ export class AppStore {
   /** volume id → enrichment coverage, refreshed with the volume list */
   coverage = $state<Record<number, EnrichCoverage>>({});
   download = $state<DownloadProgress | null>(null);
+  /** Duplicate groups being hashed in full, by quick hash. Kept here so the Duplicates view
+   * shows them again after switching away and back. */
+  verifying = $state<Record<string, VerifyProgress>>({});
   /** Incremented whenever the catalogue content changed, so the search view re-runs. */
   catalogVersion = $state(0);
   error = $state<string | null>(null);
@@ -41,6 +45,15 @@ export class AppStore {
     await this.refresh();
     await api.onVolumesChanged(() => this.scheduleRefresh());
     await api.onCatalogChanged(() => this.bumpCatalog());
+    for (const p of await api.verifying()) this.verifying[p.hash] = p;
+    await api.onVerifyProgress((p) => {
+      if (p.done) {
+        delete this.verifying[p.hash];
+        this.catalogVersion += 1;
+      } else {
+        this.verifying[p.hash] = p;
+      }
+    });
     await api.onScanProgress((p) => this.onScan(p));
     await api.onEnrichProgress((p) => this.onEnrich(p));
     await api.onToolDownload((p) => {
