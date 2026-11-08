@@ -464,6 +464,7 @@ export const api = {
   removeVolume: (volumeId: number) => invoke<void>("remove_volume", { volumeId }),
   updateVolume: (volumeId: number, patch: VolumePatch) =>
     invoke<Volume>("update_volume", { volumeId, patch }),
+  reorderVolumes: (ids: number[]) => invoke<void>("reorder_volumes", { ids }),
   search: (query: string, options: Partial<SearchOptions> = {}) =>
     call<SearchResponse>(
       "search",

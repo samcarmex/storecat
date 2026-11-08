@@ -404,6 +404,14 @@ pub fn update_volume(
     Ok(v)
 }
 
+/// Saves the order the user dragged the drives into.
+#[tauri::command]
+pub fn reorder_volumes(app: AppHandle, state: State<AppState>, ids: Vec<i64>) -> CmdResult<()> {
+    state.catalog.set_volume_order(&ids).map_err(err)?;
+    let _ = app.emit("volumes-changed", ());
+    Ok(())
+}
+
 // ----- search and items -----------------------------------------------------------------
 
 #[tauri::command]

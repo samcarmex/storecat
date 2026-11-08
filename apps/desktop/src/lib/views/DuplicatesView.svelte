@@ -8,6 +8,7 @@
 </script>
 
 <script lang="ts">
+  import DriveName from "../components/DriveName.svelte";
   import { api, ops, type Kind, type DupGroup, type DupMember, type DupPick, type DupScope, type DupSort, type DupSummary } from "../api";
   import type { AppStore } from "../store.svelte";
   import type { ViewId } from "../nav";
@@ -397,7 +398,7 @@
                   <input type="radio" name={"keep-" + g.hash} checked={isKeep} onchange={() => (keep[g.hash] = id(m))} aria-label="Keep this copy" title="Keep this copy" />
                 {/if}
                 <span class="dot" class:live={m.volume_online} title={m.volume_online ? "Connected" : "Not connected"}></span>
-                <span class="vol">{m.volume_label}</span>
+                <span class="vol"><DriveName id={m.volume_id} label={m.volume_label} /></span>
                 <span class="path mono" title={(m.path ? displayPath(m.path) + "\\" : "") + m.name}>{m.path ? displayPath(m.path) + "\\" : ""}{m.name}</span>
                 {#if m.app_managed}
                   <span class="tag">App copy · left alone</span>

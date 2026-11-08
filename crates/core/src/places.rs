@@ -75,9 +75,100 @@ pub fn is_app_managed(dir_path: &str) -> bool {
     })
 }
 
+/// Where an item sits, for ranking search results: most searches are for a person's own
+/// files, not what Windows and apps keep for themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// Desktop, Documents, Downloads, Pictures and the like under a user's home folder.
+    User,
+    /// System, program and app-managed folders.
+    System,
+    Other,
+}
+
+/// The folders people keep their own things in, inside `Users/<name>/`.
+const USER_FOLDERS: &[&str] = &[
+    "desktop",
+    "documents",
+    "downloads",
+    "pictures",
+    "videos",
+    "music",
+    "movies",
+    "onedrive",
+    "dropbox",
+    "google drive",
+    "icloud drive",
+    "iclouddrive",
+    "creative cloud files",
+    "projects",
+];
+
+/// `path` is the item's full path relative to its drive, `/`-separated.
+pub fn search_place(path: &str) -> Place {
+    if is_app_managed(path) {
+        return Place::System;
+    }
+    let segs: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    let eq = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    match segs.as_slice() {
+        [first, ..]
+            if [
+                "$recycle.bin",
+                "perflogs",
+                "$winreagent",
+                "msocache",
+                "intel",
+                "drivers",
+            ]
+            .iter()
+            .any(|b| eq(first, b)) =>
+        {
+            Place::System
+        }
+        [users, name, folder, ..]
+            if (eq(users, "users") || eq(users, "home"))
+                && !["public", "default", "all users", "default user"]
+                    .iter()
+                    .any(|b| eq(name, b))
+                && USER_FOLDERS.iter().any(|f| {
+                    let l = folder.to_ascii_lowercase();
+                    l == *f || l.starts_with(&format!("{f} - ")) || l.starts_with(&format!("{f}-"))
+                }) =>
+        {
+            Place::User
+        }
+        _ => Place::Other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_places() {
+        assert_eq!(search_place("Users/sam/Documents/Invoices"), Place::User);
+        assert_eq!(
+            search_place("Users/sam/OneDrive - Unknown Vision/Clients"),
+            Place::User
+        );
+        assert_eq!(search_place("Users/sam/Desktop"), Place::User);
+        assert_eq!(
+            search_place("Users/sam/AppData/Local/Packages/x"),
+            Place::System
+        );
+        assert_eq!(search_place("Windows/System32"), Place::System);
+        assert_eq!(search_place("Program Files/Adobe"), Place::System);
+        assert_eq!(search_place("$Recycle.Bin/S-1-5"), Place::System);
+        assert_eq!(
+            search_place("Users/sam/source/node_modules/x"),
+            Place::System
+        );
+        assert_eq!(search_place("Users/Public/Documents"), Place::Other);
+        assert_eq!(search_place("Clients/Equinox"), Place::Other);
+        assert_eq!(search_place(""), Place::Other);
+    }
 
     #[test]
     fn leftovers() {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import DriveName from "../components/DriveName.svelte";
   import { api, storage, type DupSummary, type FolderTree, type JobSpec, type KindBytes, type Suggestion, type Volume } from "../api";
   import type { AppStore } from "../store.svelte";
   import type { ViewId } from "../nav";
@@ -366,7 +367,7 @@
       {@const pct = v.capacity > 0 ? (used / v.capacity) * 100 : 0}
       <div class="row">
         <span class="name">
-          <span class="type" style="color: {MEDIA_COLOR[v.media_type]}">{MEDIA_LABEL[v.media_type]}</span>{v.label}
+          <span class="type" style="color: {MEDIA_COLOR[v.media_type]}">{MEDIA_LABEL[v.media_type]}</span><DriveName id={v.id} label={v.label} />
         </span>
         <div class="bar" title="{pct.toFixed(0)}% used"><div style="width: {pct}%; background: {pct >= 90 ? 'var(--danger)' : MEDIA_COLOR[v.media_type]}"></div></div>
         <span class="muted right">

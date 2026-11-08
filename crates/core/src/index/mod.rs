@@ -61,7 +61,7 @@ pub fn name_key(name: &str) -> u64 {
 
 /// Bumped when documents change shape without the Tantivy schema changing (a new flag
 /// bit, say): the index is then rebuilt from the catalogues on the next start.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 const VERSION_FILE: &str = "storecat-index-version";
 
 #[derive(Clone, Copy)]
@@ -355,10 +355,24 @@ impl SearchIndex {
         doc.add_u64(f.kind, d.kind as u8 as u64);
         doc.add_u64(f.size, d.size);
         doc.add_i64(f.mtime, d.mtime);
-        let flags = if crate::places::is_leftover_item(d.item_type, d.name, d.path) {
+        let mut flags = if crate::places::is_leftover_item(d.item_type, d.name, d.path) {
             d.flags | flags::OS_LEFTOVER
         } else {
             d.flags
+        };
+        let full = if d.item_type == ItemType::Dir {
+            if d.path.is_empty() {
+                d.name.to_string()
+            } else {
+                format!("{}/{}", d.path, d.name)
+            }
+        } else {
+            d.path.to_string()
+        };
+        flags |= match crate::places::search_place(&full) {
+            crate::places::Place::User => flags::USER_PLACE,
+            crate::places::Place::System => flags::SYSTEM_PLACE,
+            crate::places::Place::Other => 0,
         };
         doc.add_u64(f.flags, flags);
         for bit in 0..8 {
@@ -519,7 +533,17 @@ impl SearchIndex {
             Ok((hits.into_iter().map(|a| (0.0, a)).collect(), count))
         };
         let (addrs, total): (Vec<(f32, tantivy::DocAddress)>, usize) = match sort {
-            SortBy::Relevance => searcher.search(&query, &(top(), Count))?,
+            SortBy::Relevance => {
+                // Matches in a person's own folders first, system and app folders last.
+                let ranked = top().tweak_score(move |segment: &tantivy::SegmentReader| {
+                    let column = segment.fast_fields().u64("flags").ok();
+                    move |doc: tantivy::DocId, score: tantivy::Score| {
+                        let bits = column.as_ref().and_then(|c| c.first(doc)).unwrap_or(0);
+                        score * place_weight(bits)
+                    }
+                });
+                searcher.search(&query, &(ranked, Count))?
+            }
             SortBy::ModifiedDesc => by("mtime", Order::Desc)?,
             SortBy::ModifiedAsc => by("mtime", Order::Asc)?,
             SortBy::SizeDesc => by("size", Order::Desc)?,
@@ -844,6 +868,17 @@ fn any_of(terms: impl Iterator<Item = Term>) -> Box<dyn Query> {
     Box::new(BooleanQuery::new(shoulds))
 }
 
+/// How much a match's place lifts or lowers it in relevance order.
+fn place_weight(bits: u64) -> f32 {
+    if bits & flags::SYSTEM_PLACE != 0 {
+        0.25
+    } else if bits & flags::USER_PLACE != 0 {
+        1.6
+    } else {
+        1.0
+    }
+}
+
 pub fn parent_of(rel_path: &str) -> &str {
     match rel_path.rfind('/') {
         Some(i) => &rel_path[..i],
@@ -1128,6 +1163,48 @@ mod tests {
             .search(&query::parse("recipe"), None, SortBy::Relevance, 10, 0)
             .unwrap();
         assert_eq!(r.total, 0);
+    }
+
+    #[test]
+    fn own_folders_rank_above_app_folders() {
+        let (_t, idx) = sample_index();
+        for (id, path) in [
+            (200, "Users/sam/AppData/Local/Packages/app"),
+            (201, "Clients/Report"),
+            (202, "Users/sam/Documents/Reports"),
+        ] {
+            idx.add_doc(&DocInput {
+                volume_id: 3,
+                item_id: id,
+                item_type: ItemType::File,
+                name: "quarterly_report.pdf",
+                path,
+                ext: "pdf",
+                kind: Kind::Document,
+                size: 1000,
+                mtime: 0,
+                flags: 0,
+                parent_key: 0,
+                content: None,
+                meta_text: None,
+                tags: &[],
+            })
+            .unwrap();
+        }
+        idx.commit().unwrap();
+        let r = idx
+            .search(
+                &query::parse("quarterly report"),
+                Some(&[3]),
+                SortBy::Relevance,
+                10,
+                0,
+            )
+            .unwrap();
+        let ids: Vec<u64> = r.hits.iter().map(|h| h.item_id).collect();
+        assert_eq!(ids, vec![202, 201, 200]);
+        assert!(r.hits[0].flags & flags::USER_PLACE != 0);
+        assert!(r.hits[2].flags & flags::SYSTEM_PLACE != 0);
     }
 
     #[test]

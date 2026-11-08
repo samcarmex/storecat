@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { untrack } from "svelte";
+  import DriveName from "./DriveName.svelte";
   import { api, ops, thumbUrl, type ItemDetail, type SearchHit } from "../api";
   import { bytes, count, dateTime, displayPath, KIND_LABEL, KIND_TILE, metaRows, tileText } from "../format";
 
@@ -30,8 +32,12 @@
     }
   }
 
+  /** Which item is shown: a refreshed copy of the same item doesn't reload the pane. */
+  const itemKey = $derived(hit ? `${hit.volume_id}:${hit.item_type}:${hit.item_id}:${hit.mtime}:${hit.size}` : "");
+
   $effect(() => {
-    const h = hit;
+    void itemKey;
+    const h = untrack(() => hit);
     detail = null;
     error = null;
     thumbFailed = false;
@@ -123,7 +129,7 @@
     <div>
       <div class="name">{hit.name}</div>
       <div class="muted kindline">
-        {KIND_LABEL[hit.kind]}{hit.is_dir ? "" : ` · ${bytes(hit.size)}`} · {hit.volume_label}
+        {KIND_LABEL[hit.kind]}{hit.is_dir ? "" : ` · ${bytes(hit.size)}`} · <DriveName id={hit.volume_id} label={hit.volume_label} />
         {#if detail?.meta?.width && detail?.meta?.height} · {detail.meta.width} × {detail.meta.height}{/if}
       </div>
     </div>
@@ -144,7 +150,7 @@
         </svg>
         <span>
           <strong>Not plugged in.</strong><br />
-          {hit.volume_label}{detail?.volume_location ? ` — ${detail.volume_location}` : ""}
+          <DriveName id={hit.volume_id} label={hit.volume_label} />{detail?.volume_location ? ` — ${detail.volume_location}` : ""}
         </span>
       </div>
     {/if}

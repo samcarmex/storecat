@@ -345,6 +345,11 @@ impl Catalog {
         self.volume(id)
     }
 
+    /// Lists drives in this order from now on (the Drives view lets the user drag them).
+    pub fn set_volume_order(&self, ids: &[VolumeId]) -> Result<()> {
+        self.master().set_volume_order(ids)
+    }
+
     pub fn remove_volume(&self, id: VolumeId) -> Result<()> {
         if self.is_scanning(id) || self.is_enriching(id) {
             return Err(Error::ScanInProgress);
@@ -1764,6 +1769,42 @@ mod tests {
             threads: 2,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn drives_keep_the_order_they_were_dragged_into() {
+        let data = tempfile::tempdir().unwrap();
+        let trees: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        let cat = Catalog::open(DataDirs::at(data.path())).unwrap();
+        let ids: Vec<_> = trees
+            .iter()
+            .enumerate()
+            .map(|(i, t)| cat.add_folder(t.path(), Some(&format!("D{i}"))).unwrap().id)
+            .collect();
+        let order = |c: &Catalog| {
+            c.volumes()
+                .unwrap()
+                .iter()
+                .map(|v| v.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&cat), ids, "added order by default");
+        cat.set_volume_order(&[ids[2], ids[0]]).unwrap();
+        assert_eq!(
+            order(&cat),
+            vec![ids[2], ids[0], ids[1]],
+            "unlisted drives go after"
+        );
+        let extra = tempfile::tempdir().unwrap();
+        let new = cat.add_folder(extra.path(), Some("New")).unwrap().id;
+        assert_eq!(*order(&cat).last().unwrap(), new, "a new drive goes last");
+        drop(cat);
+        let cat = Catalog::open(DataDirs::at(data.path())).unwrap();
+        assert_eq!(
+            order(&cat)[..3],
+            [ids[2], ids[0], ids[1]],
+            "kept after reopening"
+        );
     }
 
     #[test]

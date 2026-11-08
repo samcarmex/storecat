@@ -5,6 +5,8 @@
 The feature-complete build for 1.0, for testing on real drive collections.
 
 **Storage smarts**
+- Drag drive cards to put them in your own order; it's saved and used wherever drives
+  are listed.
 - Drive profiles: SSD, NVMe or spinning disk, connection (USB, SATA, NVMe, network,
   optical), model and the health Windows reports, refreshed whenever a drive connects.
   Catalogued folders inherit their drive's profile. USB enclosures that don't say whether
@@ -115,6 +117,12 @@ The feature-complete build for 1.0, for testing on real drive collections.
 - Sharper installer artwork on high-DPI displays.
 
 **Search**
+- Results in your own folders (Desktop, Documents, Downloads, Pictures, OneDrive...) rank
+  first, and matches in Windows, Program Files, `AppData`, caches and build output rank
+  last. The search index rebuilds once on first launch to learn where each file lives.
+- New matches on a watched drive no longer reset the result list: the scroll position and
+  the selected file stay put, and the details pane doesn't flash as more results load.
+- Hovering a drive's name in Search, Storage or Duplicates shows the drive's photo.
 - Click the Name, Size or Modified heading to sort; click again to reverse. Typing words
   returns to best match first; filter-only searches such as `ext:mp3` list by name.
 - Choosing Audio, Video, Images, Documents, Design or Archives shows the extensions

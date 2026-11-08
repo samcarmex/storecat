@@ -12,7 +12,7 @@ use crate::model::{
     VolumeSource,
 };
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 pub struct MasterDb {
     conn: Connection,
@@ -179,6 +179,17 @@ impl MasterDb {
                  ALTER TABLE volumes ADD COLUMN fault_at INTEGER;",
             )?;
         }
+        if version < 5 {
+            // The order drives are listed in, which the user can change by dragging.
+            self.conn.execute_batch(
+                "ALTER TABLE volumes ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+                 UPDATE volumes SET position = (
+                     SELECT COUNT(*) FROM volumes o
+                     WHERE o.created_at < volumes.created_at
+                        OR (o.created_at = volumes.created_at AND o.id <= volumes.id)
+                 );",
+            )?;
+        }
         if version < SCHEMA_VERSION {
             self.conn
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -190,8 +201,9 @@ impl MasterDb {
         let now = now_unix();
         self.conn.execute(
             "INSERT INTO volumes (identity, source, label, fs, capacity, free, media_type,
-                                  last_seen_at, last_mount_path, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?8)",
+                                  last_seen_at, last_mount_path, created_at, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?8,
+                     (SELECT COALESCE(MAX(position), 0) + 1 FROM volumes))",
             params![
                 v.identity,
                 v.source.as_str(),
@@ -208,11 +220,37 @@ impl MasterDb {
     }
 
     pub fn list_volumes(&self) -> Result<Vec<Volume>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT * FROM volumes ORDER BY created_at ASC, id ASC")?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT * FROM volumes ORDER BY position ASC, created_at ASC, id ASC",
+        )?;
         let rows = stmt.query_map([], row_to_volume)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Lists drives in this order from now on. Drives left out keep their place after
+    /// the ones given.
+    pub fn set_volume_order(&mut self, ids: &[VolumeId]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached("UPDATE volumes SET position = ?2 WHERE id = ?1")?;
+            for (i, id) in ids.iter().enumerate() {
+                stmt.execute(params![id, i as i64 + 1])?;
+            }
+            let n = ids.len() as i64;
+            let rest: Vec<VolumeId> = {
+                let mut q =
+                    tx.prepare_cached("SELECT id FROM volumes ORDER BY position, created_at, id")?;
+                let all = q
+                    .query_map([], |r| r.get(0))?
+                    .collect::<std::result::Result<Vec<VolumeId>, _>>()?;
+                all.into_iter().filter(|id| !ids.contains(id)).collect()
+            };
+            for (i, id) in rest.iter().enumerate() {
+                stmt.execute(params![id, n + i as i64 + 1])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn get_volume(&self, id: VolumeId) -> Result<Option<Volume>> {

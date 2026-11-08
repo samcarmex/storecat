@@ -4,8 +4,83 @@
   import DriveIcon from "../components/DriveIcon.svelte";
   import EmptyState from "../components/EmptyState.svelte";
   import DriveCard from "../components/DriveCard.svelte";
+  import { flip } from "svelte/animate";
+  import type { Volume } from "../api";
 
   let { store }: { store: AppStore } = $props();
+
+  // Drag a card to reorder. Pointer events rather than HTML drag and drop, which the
+  // window's own file-drop handling swallows on Windows.
+  const THRESHOLD = 6;
+  let order = $state<number[] | null>(null);
+  let dragging = $state<number | null>(null);
+  let press: { id: number; x: number; y: number } | null = null;
+
+  const shown = $derived.by((): Volume[] => {
+    if (!order) return store.volumes;
+    const by = new Map(store.volumes.map((v) => [v.id, v]));
+    return order.map((id) => by.get(id)).filter((v): v is Volume => !!v);
+  });
+
+  function down(e: PointerEvent, id: number) {
+    if (e.button !== 0 || store.volumes.length < 2) return;
+    const t = e.target as HTMLElement;
+    if (t.closest("input, textarea, select, [contenteditable], .no-drag")) return;
+    press = { id, x: e.clientX, y: e.clientY };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("keydown", key);
+  }
+
+  function move(e: PointerEvent) {
+    if (!press) return;
+    if (dragging === null) {
+      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) < THRESHOLD) return;
+      dragging = press.id;
+      order = store.volumes.map((v) => v.id);
+      document.body.classList.add("reordering");
+      window.getSelection()?.removeAllRanges();
+    }
+    e.preventDefault();
+    const over = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>("[data-drive]");
+    const target = over ? Number(over.dataset.drive) : null;
+    if (target === null || target === dragging || !order) return;
+    const from = order.indexOf(dragging);
+    const to = order.indexOf(target);
+    const next = order.filter((id) => id !== dragging);
+    next.splice(to, 0, dragging);
+    if (from !== to) order = next;
+  }
+
+  function finish(save: boolean) {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", cancel);
+    window.removeEventListener("keydown", key);
+    document.body.classList.remove("reordering");
+    const moved = dragging !== null;
+    if (moved && save && order && order.join() !== store.volumes.map((v) => v.id).join()) {
+      void store.reorderVolumes(order);
+    }
+    if (moved) {
+      // The release would otherwise click whatever button it landed on.
+      window.addEventListener("click", swallow, { capture: true, once: true });
+      setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 0);
+    }
+    press = null;
+    dragging = null;
+    order = null;
+  }
+  const up = () => finish(true);
+  const cancel = () => finish(false);
+  const key = (e: KeyboardEvent) => {
+    if (e.key === "Escape") finish(false);
+  };
+  function swallow(e: MouseEvent) {
+    e.stopPropagation();
+    e.preventDefault();
+  }
 
   const headline = $derived.by(() => {
     const n = store.volumes.length;
@@ -63,11 +138,23 @@
     body="Catalogue a connected drive above, or add any folder or network share. Each one gets its own catalogue and a stable identity that survives drive-letter changes."
   />
 {:else}
-  <div class="grid">
-    {#each store.volumes as v (v.id)}
-      <DriveCard volume={v} {store} />
+  <div class="grid" class:reordering={dragging !== null} role="list" aria-label="Catalogued drives">
+    {#each shown as v (v.id)}
+      <div
+        class="slot"
+        class:lifted={dragging === v.id}
+        data-drive={v.id}
+        onpointerdown={(e) => down(e, v.id)}
+        animate:flip={{ duration: 180 }}
+        role="listitem"
+      >
+        <DriveCard volume={v} {store} />
+      </div>
     {/each}
   </div>
+  {#if store.volumes.length > 1}
+    <p class="muted hint">Drag a drive to change the order. It's used everywhere drives are listed.</p>
+  {/if}
 {/if}
 
 <style>
@@ -162,5 +249,31 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: 14px;
+  }
+  .slot {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .slot > :global(*) {
+    flex: 1;
+  }
+  .grid.reordering {
+    user-select: none;
+  }
+  .slot.lifted {
+    opacity: 0.55;
+    transform: scale(0.98);
+    outline: 2px dashed var(--line-strong);
+    outline-offset: 4px;
+    border-radius: var(--radius-card);
+  }
+  :global(body.reordering),
+  :global(body.reordering *) {
+    cursor: grabbing !important;
+  }
+  .hint {
+    text-align: center;
+    padding: 4px 0;
   }
 </style>

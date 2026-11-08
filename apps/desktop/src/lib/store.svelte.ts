@@ -2,6 +2,7 @@
  * App-wide reactive state: volumes, catalogue stats, live scan and enrichment progress.
  * One instance, created in App.svelte, refreshed from backend events.
  */
+import { syncDrivePhotos } from "./drivePhotos.svelte";
 import {
   api,
   type CatalogStats,
@@ -92,6 +93,7 @@ export class AppStore {
         api.enrichQueued(),
       ]);
       this.volumes = volumes;
+      syncDrivePhotos(volumes);
       this.detected = detected;
       this.stats = stats;
       this.watchRebuild();
@@ -282,6 +284,18 @@ export class AppStore {
       await this.refresh();
     } catch (e) {
       this.error = String(e);
+    }
+  }
+
+  /** Lists drives in this order, saved straight away. */
+  async reorderVolumes(ids: number[]) {
+    const at = new Map(ids.map((id, i) => [id, i]));
+    this.volumes = [...this.volumes].sort((a, b) => (at.get(a.id) ?? ids.length) - (at.get(b.id) ?? ids.length));
+    try {
+      await api.reorderVolumes(ids);
+    } catch (e) {
+      this.error = String(e);
+      await this.refresh();
     }
   }
 

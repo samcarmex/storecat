@@ -9,6 +9,7 @@
 </script>
 
 <script lang="ts">
+  import DriveName from "../components/DriveName.svelte";
   import { api, type FolderMatch, type FolderSide, type OverlapReport, type Volume } from "../api";
   import type { AppStore } from "../store.svelte";
   import { bytes, count, displayPath, KIND_COLOR, KIND_LABEL } from "../format";
@@ -228,7 +229,7 @@
       <div class="map-wrap" bind:this={mapEl} onmouseleave={() => (tip = null)} role="presentation">
         <div class="map" style="grid-template-columns: minmax(110px, 160px) repeat({drives.length}, 58px)">
           {#each drives as row, i (row.volume_id)}
-            <span class="rlabel" title={label(row.volume_id)}>{label(row.volume_id)}</span>
+            <span class="rlabel"><DriveName id={row.volume_id} label={label(row.volume_id)} /></span>
             {#each drives as col, j (col.volume_id)}
               {#if j < i}
                 {@const b = shared.get(key(row.volume_id, col.volume_id)) ?? 0}
@@ -307,7 +308,7 @@
           {@const fit = d.only_here > 0 ? room(d.volume_id, d.only_here) : null}
           <li>
             <div class="only-line">
-              <span class="dname" title={label(d.volume_id)}>{label(d.volume_id)}</span>
+              <span class="dname"><DriveName id={d.volume_id} label={label(d.volume_id)} /></span>
               {#if v?.fault}<span class="tag bad" title={v.fault}>Read errors</span>{/if}
               {#if hashing(d.volume_id)}<span class="tag" title="Enrichment hasn't finished hashing this drive, so these numbers will change">Still hashing</span>{/if}
               <span class="spacer"></span>
@@ -389,7 +390,7 @@
                   {@const v = vols.get(s.volume_id)}
                   <div class="side" class:keep={isKeep}>
                     <span class="dot" class:live={v?.online} title={v?.online ? "Connected" : "Not connected"}></span>
-                    <span class="vol" title={label(s.volume_id)}>{label(s.volume_id)}</span>
+                    <span class="vol"><DriveName id={s.volume_id} label={label(s.volume_id)} /></span>
                     <span class="path mono" title={path(s)}>{path(s)}</span>
                     {#if k === 1 && scattered}
                       <span class="tag" title="The first folder's files are spread through this bigger folder rather than in one subfolder">spread out</span>

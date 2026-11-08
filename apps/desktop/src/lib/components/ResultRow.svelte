@@ -1,4 +1,5 @@
 <script lang="ts">
+  import DriveName from "./DriveName.svelte";
   import { FLAG_HAS_THUMB, FLAG_HAS_TEXT, FLAG_PLACEHOLDER, thumbUrl, type SearchHit } from "../api";
   import { bytes, date, displayPath, KIND_TILE, tileText } from "../format";
 
@@ -45,7 +46,7 @@
   </span>
   <span class="drive">
     <span class="dot" class:live={hit.volume_online}></span>
-    <span class="label">{hit.volume_label}</span>
+    <span class="label"><DriveName id={hit.volume_id} label={hit.volume_label} /></span>
   </span>
   <span class="size">{hit.is_dir ? "" : bytes(hit.size)}</span>
   <span class="when muted">{date(hit.mtime)}</span>

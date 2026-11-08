@@ -130,6 +130,9 @@
     input?.focus();
   });
 
+  /** The query and order the list was last loaded for. */
+  let lastRun = "";
+
   // Re-run on query/filter/sort change, and whenever the catalogue content changes.
   $effect(() => {
     const q = effectiveQuery;
@@ -139,23 +142,37 @@
     timer = setTimeout(() => run(q, s), 40);
   });
 
+  const hitKey = (h: SearchHit) => `${h.volume_id}:${h.item_type}:${h.item_id}`;
+
   async function run(q: string, s: SortBy) {
     const my = ++seq;
     if (!q.trim()) {
       hits = [];
       total = 0;
       selectedIndex = -1;
+      lastRun = "";
       return;
     }
-    const r = await api.search(q, { limit: PAGE, offset: 0, sort: s });
+    // The same search again (files changed on a watched drive): refresh what's loaded in
+    // place, keeping the scroll position and the selected item.
+    const again = lastRun === `${s} | ${q}` && hits.length > 0;
+    const limit = again ? Math.min(Math.max(PAGE, hits.length), 5000) : PAGE;
+    const r = await api.search(q, { limit, offset: 0, sort: s });
     if (my !== seq) return;
+    const keep = again && selected ? hitKey(selected) : null;
     hits = r.hits;
     total = r.total;
     elapsed = r.elapsed_ms;
     shownText = r.text;
     shownSort = r.sort ?? s;
-    selectedIndex = hits.length ? 0 : -1;
-    list?.scrollToIndex(0);
+    lastRun = `${s} | ${q}`;
+    if (again) {
+      const i = keep ? hits.findIndex((h) => hitKey(h) === keep) : -1;
+      selectedIndex = i >= 0 ? i : Math.min(selectedIndex, hits.length - 1);
+    } else {
+      selectedIndex = hits.length ? 0 : -1;
+      list?.scrollToIndex(0);
+    }
   }
 
   async function loadMore() {
@@ -164,7 +181,12 @@
     const my = seq;
     try {
       const r = await api.search(effectiveQuery, { limit: PAGE, offset: hits.length, sort });
-      if (my === seq) hits = [...hits, ...r.hits];
+      if (my === seq) {
+        // Skip anything already listed, in case the catalogue changed in between.
+        const have = new Set(hits.map(hitKey));
+        hits = [...hits, ...r.hits.filter((h) => !have.has(hitKey(h)))];
+        total = Math.max(r.total, hits.length);
+      }
     } finally {
       loadingMore = false;
     }

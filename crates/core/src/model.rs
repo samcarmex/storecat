@@ -165,6 +165,12 @@ pub mod flags {
     /// A file an operating system left behind (`._name`, `.DS_Store`, `Thumbs.db`...).
     /// Hidden from search unless the query asks for `is:leftover`.
     pub const OS_LEFTOVER: u64 = 32;
+    /// In a system, program or app-managed folder (`Windows`, `AppData`, caches, build
+    /// output). Ranked below other matches.
+    pub const SYSTEM_PLACE: u64 = 64;
+    /// In a person's own folders (`Users/<name>/Documents`, `Desktop`, `Pictures`...).
+    /// Ranked above other matches.
+    pub const USER_PLACE: u64 = 128;
 }
 
 /// A volume the platform layer can see right now.

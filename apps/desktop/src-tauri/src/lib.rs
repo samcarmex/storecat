@@ -137,6 +137,7 @@ pub fn run() {
             commands::scanning,
             commands::remove_volume,
             commands::update_volume,
+            commands::reorder_volumes,
             commands::search,
             commands::item_detail,
             commands::open_item,
