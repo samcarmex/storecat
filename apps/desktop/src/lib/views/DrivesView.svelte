@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { AppStore } from "../store.svelte";
-  import { bytes, count, MEDIA_COLOR, MEDIA_LABEL } from "../format";
+  import { bytes, count, driveKind, MEDIA_COLOR, MEDIA_LABEL } from "../format";
+  import DriveIcon from "../components/DriveIcon.svelte";
   import EmptyState from "../components/EmptyState.svelte";
   import DriveCard from "../components/DriveCard.svelte";
 
@@ -43,6 +44,7 @@
     <ul>
       {#each store.detected as d (d.identity)}
         <li>
+          <span class="dicon" style="color: {MEDIA_COLOR[d.media_type]}"><DriveIcon kind={driveKind(d)} size={26} /></span>
           <span class="type" style="color: {MEDIA_COLOR[d.media_type]}">{MEDIA_LABEL[d.media_type]}</span>
           <span class="dname">
             <span>{d.label}</span>
@@ -126,6 +128,10 @@
     gap: 14px;
     padding: 10px 0;
     border-top: 1px solid var(--line);
+  }
+  .dicon {
+    display: inline-flex;
+    flex: none;
   }
   .type {
     font-family: var(--font-display);

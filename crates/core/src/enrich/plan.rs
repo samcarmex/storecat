@@ -5,7 +5,7 @@
 //! useful soon (quick hashes, metadata, photo thumbnails, archive listings). The detail
 //! pass does what is slow per file (document text, PDF details, video thumbnails).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -65,6 +65,9 @@ const BULK_ANYWHERE: &[&str] = &[
     ".cursor",
     ".windsurf",
     ".antigravity",
+    // WordPress itself: the same core files in every site and every backup of one.
+    "wp-admin",
+    "wp-includes",
 ];
 
 /// A folder inside a particular parent: names too common to skip on their own.
@@ -75,7 +78,18 @@ const BULK_PAIRS: &[(&str, &str)] = &[
     ("android", "sdk"),
     // Deno's download cache, `%LOCALAPPDATA%\deno`.
     ("local", "deno"),
+    // WordPress plugins, translations and caches. Themes and uploads are the site's own.
+    ("wp-content", "plugins"),
+    ("wp-content", "mu-plugins"),
+    ("wp-content", "languages"),
+    ("wp-content", "upgrade"),
+    ("wp-content", "litespeed"),
+    ("wp-content", "wflogs"),
 ];
+
+/// Package folders by a name people also give their own folders, so only in the exact
+/// lowercase spelling package managers use (Composer, Bundler, Go): "Vendor" is the user's.
+const BULK_EXACT: &[&str] = &["vendor"];
 
 /// Windows folders, at the top of any drive (an old system disk on USB has them too).
 const BULK_TOP: &[&str] = &[
@@ -111,7 +125,9 @@ pub fn is_bulk_path(path: &str, system_root: bool) -> bool {
     if is(first, BULK_TOP) || (system_root && is(first, BULK_TOP_SYSTEM)) {
         return true;
     }
-    segments.iter().any(|s| is(s, BULK_ANYWHERE))
+    segments
+        .iter()
+        .any(|s| is(s, BULK_ANYWHERE) || BULK_EXACT.contains(s))
         || segments.windows(2).any(|w| {
             BULK_PAIRS.iter().any(|(parent, child)| {
                 w[0].eq_ignore_ascii_case(parent) && w[1].eq_ignore_ascii_case(child)
@@ -344,8 +360,12 @@ fn kind_rank(k: Kind) -> u8 {
 /// Spinning-disk order: by where each file's data starts, so the heads sweep across the
 /// disk once. Looking that up costs one metadata open per file; if the drive answers too
 /// slowly (more than `budget` per file on average) folder order is kept instead.
+/// Positions in `known` (remembered from an earlier run) are used without a lookup; the
+/// ones looked up are added to `found` so the next run can skip them too.
 pub(super) fn order_for_hdd(
     jobs: &mut [Job],
+    known: &HashMap<i64, Option<u64>>,
+    found: &mut Vec<(i64, Option<u64>)>,
     path_of: &mut dyn FnMut(&Job) -> Option<String>,
     cancel: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(usize),
@@ -353,21 +373,30 @@ pub(super) fn order_for_hdd(
 ) -> bool {
     jobs.sort_by_key(|j| (j.dir_id, j.id));
     let started = Instant::now();
+    let mut lookups = 0u32;
     let mut keys: Vec<u64> = Vec::with_capacity(jobs.len());
     for (i, j) in jobs.iter().enumerate() {
         if cancel() {
             return false;
         }
-        if i >= 500 && started.elapsed() > budget * i as u32 {
-            log::info!(
-                "disk positions too slow to look up ({i} in {:?}); using folder order",
-                started.elapsed()
-            );
-            return false;
-        }
+        let lcn = match known.get(&j.id) {
+            Some(lcn) => *lcn,
+            None => {
+                if lookups >= 500 && started.elapsed() > budget * lookups {
+                    log::info!(
+                        "disk positions too slow to look up ({lookups} in {:?}); using folder order",
+                        started.elapsed()
+                    );
+                    return false;
+                }
+                lookups += 1;
+                let lcn = path_of(j).and_then(|p| super::diskpos::first_cluster(Path::new(&p)));
+                found.push((j.id, lcn));
+                lcn
+            }
+        };
         // Files without clusters of their own sit in the file table: read them where their
         // folder neighbours are (keep folder order for them by using the previous key).
-        let lcn = path_of(j).and_then(|p| super::diskpos::first_cluster(Path::new(&p)));
         let key = lcn.unwrap_or_else(|| keys.last().copied().unwrap_or(0));
         keys.push(key);
         if i % 2000 == 0 {
@@ -404,6 +433,21 @@ mod tests {
         assert!(bulk("GitHub/printdash/.claude/worktrees/agent-1/src"));
         assert!(bulk("Users/sam/AppData/Local/Android/Sdk/platforms"));
         assert!(bulk("Users/sam/AppData/Local/deno/npm/registry.npmjs.org"));
+        assert!(bulk(
+            "Backups/site/public_html/wp-content/plugins/jetpack/_inc"
+        ));
+        assert!(bulk("Backups/site/public_html/wp-includes/js"));
+        assert!(bulk("Backups/site/public_html/wp-admin/css"));
+        assert!(bulk(
+            "site/wp-content/plugins/woo/includes/vendor/action-scheduler"
+        ));
+        assert!(bulk("code/app/vendor/guzzlehttp/guzzle/src"));
+        assert!(!bulk(
+            "Backups/site/public_html/wp-content/themes/goodideas"
+        ));
+        assert!(!bulk("Backups/site/public_html/wp-content/uploads/2020/08"));
+        assert!(!bulk("Clients/Acme/Vendor"));
+        assert!(!bulk("Clients/Acme/Vendors/Invoices"));
         // The same names elsewhere are the user's own.
         assert!(!bulk("GitHub/printdash/.claude/commands"));
         assert!(!bulk("Projects/worktrees/notes"));
@@ -463,5 +507,39 @@ mod tests {
         assert_ne!(deck & W_THUMB, 0);
         let deck_in_pkg = work_for(&facts("pptx", Kind::Document, 2_000_000, true), &o, true);
         assert_eq!(deck_in_pkg & W_THUMB, 0);
+    }
+
+    #[test]
+    fn remembered_positions_skip_the_lookup() {
+        let j = |id: i64| Job {
+            id,
+            dir_id: 1,
+            kind: Kind::Document,
+            size: 10,
+            work: W_TEXT,
+            stages: 0,
+        };
+        let mut jobs = vec![j(1), j(2), j(3)];
+        // File 1 sits far out, file 2 has no clusters of its own; file 3 is unknown.
+        let known: HashMap<i64, Option<u64>> = [(1, Some(900)), (2, None)].into();
+        let mut found = Vec::new();
+        let mut asked = Vec::new();
+        let mut path_of = |job: &Job| {
+            asked.push(job.id);
+            None
+        };
+        assert!(order_for_hdd(
+            &mut jobs,
+            &known,
+            &mut found,
+            &mut path_of,
+            &|| false,
+            &mut |_| {},
+            Duration::from_millis(4),
+        ));
+        assert_eq!(asked, vec![3]);
+        assert_eq!(found, vec![(3, None)]);
+        // 2 and 3 follow their folder neighbour 1's position: order kept.
+        assert_eq!(jobs.iter().map(|j| j.id).collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 }

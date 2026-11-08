@@ -135,6 +135,49 @@ export const MEDIA_COLOR: Record<MediaType, string> = {
   cloud: "var(--purple)", optical: "var(--purple)", unknown: "var(--fg-muted)",
 };
 
+/** Which picture stands for a drive when it has no photo of its own. */
+export type DriveKind =
+  | "hdd" | "external-hdd" | "ssd" | "portable-ssd" | "nvme" | "usb-stick" | "sd-card"
+  | "disc" | "network" | "cloud" | "folder" | "drive";
+
+/** USB flash drive product lines, which report no media type of their own. */
+const STICK_MODEL = /flash|cruzer|datatraveler|jumpdrive|usb ?disk|usb ?stick|thumb|pen ?drive|ultra fit|ultra flair|ultra luxe|dual drive|flair|surefire|traveler/i;
+
+/** Pick a drive's picture from what is known about it: media, how it's attached, its model. */
+export function driveKind(d: {
+  media_type: MediaType;
+  bus: string;
+  model: string;
+  capacity: number;
+  source?: "device" | "folder";
+}): DriveKind {
+  if (d.source === "folder") {
+    if (d.media_type === "network") return "network";
+    return d.media_type === "cloud" ? "cloud" : "folder";
+  }
+  const external = d.bus === "usb" || d.bus === "thunderbolt" || d.bus === "firewire";
+  switch (d.media_type) {
+    case "network":
+      return "network";
+    case "cloud":
+      return "cloud";
+    case "optical":
+      return "disc";
+    case "hdd":
+      return external ? "external-hdd" : "hdd";
+    case "nvme":
+    case "ssd":
+      if (external) return "portable-ssd";
+      return d.media_type === "nvme" || d.bus === "nvme" ? "nvme" : "ssd";
+  }
+  if (d.bus === "sd" || d.bus === "mmc") return "sd-card";
+  if (d.bus === "optical" || d.bus === "atapi") return "disc";
+  if (d.bus === "network" || d.bus === "iscsi") return "network";
+  if (d.bus === "nvme") return "nvme";
+  if (d.bus === "usb" && (STICK_MODEL.test(d.model) || (d.capacity > 0 && d.capacity <= 512e9))) return "usb-stick";
+  return "drive";
+}
+
 export function tileText(hit: { ext: string; is_dir: boolean; kind: Kind }): string {
   if (hit.is_dir) return "DIR";
   if (hit.ext) return hit.ext.toUpperCase().slice(0, 4);

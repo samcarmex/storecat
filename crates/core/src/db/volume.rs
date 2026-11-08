@@ -52,6 +52,12 @@ const ENRICHMENT_TABLES: &str = "
         stages  INTEGER NOT NULL DEFAULT 0,
         error   TEXT,
         at      INTEGER
+    );
+    -- Where each file's data starts on a spinning disk (NULL: it has no clusters of its
+    -- own), so a resumed enrichment doesn't look every file up again.
+    CREATE TABLE IF NOT EXISTS diskpos (
+        file_id INTEGER PRIMARY KEY,
+        lcn     INTEGER
     );";
 
 impl VolumeDbWriter {
@@ -692,6 +698,56 @@ impl VolumeDb {
         Ok(Some(new_entries))
     }
 
+    /// Disk positions remembered from earlier enrichment runs.
+    pub fn disk_positions(&self) -> Result<std::collections::HashMap<i64, Option<u64>>> {
+        let mut stmt = self.conn.prepare("SELECT file_id, lcn FROM diskpos")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(1)?.map(|n| n as u64),
+            ))
+        })?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (id, lcn) = row?;
+            out.insert(id, lcn);
+        }
+        Ok(out)
+    }
+
+    /// Remember disk positions looked up while planning.
+    pub fn save_disk_positions(&self, found: &[(i64, Option<u64>)]) -> Result<()> {
+        if found.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> Result<()> {
+            let mut ins = self
+                .conn
+                .prepare_cached("INSERT OR REPLACE INTO diskpos (file_id, lcn) VALUES (?1, ?2)")?;
+            for (id, lcn) in found {
+                ins.execute(params![id, lcn.map(|n| n as i64)])?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Forget disk positions once nothing is left to read (and for files that are gone).
+    pub fn clear_disk_positions(&self) -> Result<()> {
+        self.conn.execute_batch("DELETE FROM diskpos")?;
+        Ok(())
+    }
+
     pub fn has_file(&self, file_id: i64) -> Result<bool> {
         let mut stmt = self
             .conn
@@ -878,6 +934,12 @@ impl VolumeDb {
                     "INSERT OR IGNORE INTO main.enrich (file_id, done, stages, error, at)
                      SELECT m.new_id, e.done, e.stages, e.error, e.at
                      FROM old.enrich e JOIN temp.idmap m ON m.old_id = e.file_id;",
+                )?;
+            }
+            if has("diskpos") {
+                self.conn.execute_batch(
+                    "INSERT OR IGNORE INTO main.diskpos (file_id, lcn)
+                     SELECT m.new_id, p.lcn FROM old.diskpos p JOIN temp.idmap m ON m.old_id = p.file_id;",
                 )?;
             }
             if let (Some(ot), Some(nt)) = (old_thumbs, new_thumbs) {

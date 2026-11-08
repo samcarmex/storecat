@@ -2,7 +2,8 @@
   import { untrack } from "svelte";
   import { ops, volumePhotoUrl, type Role, type Volume } from "../api";
   import type { AppStore } from "../store.svelte";
-  import { ago, busLabel, bytes, count, duration, HEALTH_COLOR, HEALTH_LABEL, MEDIA_COLOR, MEDIA_LABEL } from "../format";
+  import { ago, busLabel, bytes, count, driveKind, duration, HEALTH_COLOR, HEALTH_LABEL, MEDIA_COLOR, MEDIA_LABEL } from "../format";
+  import DriveIcon from "./DriveIcon.svelte";
 
   let { volume: v, store }: { volume: Volume; store: AppStore } = $props();
 
@@ -83,6 +84,7 @@
     "Hashes, details, photo thumbnails and archive contents",
     "Document text and video thumbnails",
   ];
+  const kind = $derived(driveKind(v));
   const profile = $derived([v.bus ? busLabel(v.bus) : "", v.model].filter(Boolean).join(" · "));
   /** Another catalogued volume that already contains this one (its files appear twice). */
   const insideOf = $derived.by(() => {
@@ -118,6 +120,12 @@
     setTimeout(() => (confirmRemove = false), 4000);
   }
 
+  async function pickPhoto() {
+    menu = false;
+    await ops.setVolumePhoto(v.id);
+    await store.refresh();
+  }
+
   async function doExport() {
     menu = false;
     const p = await store.exportVolume(v.id);
@@ -142,10 +150,6 @@
     </span>
   </header>
 
-  {#if v.photo && !editing}
-    <img class="photo" src={volumePhotoUrl(v.id) + "?t=" + v.last_seen_at} alt="" />
-  {/if}
-
   {#if editing}
     <div class="edit">
       <input bind:value={draftLabel} placeholder="Name" aria-label="Drive name" />
@@ -157,16 +161,28 @@
       </div>
     </div>
   {:else}
-    <button class="title" onclick={startEdit} title="Edit name, location and notes">
-      <span class="name">{v.label}</span>
-      {#if v.mount_path}<span class="muted mount">{v.mount_path}</span>{:else if v.location}<span class="muted mount">{v.location}</span>{/if}
-    </button>
-    <div class="big">
-      <span class="num">{freeText}</span>
-      <span class="muted">
-        {#if v.capacity > 0}free of {bytes(v.capacity)}{:else}catalogued{/if}
-        · {count(v.file_count)} files
-      </span>
+    <div class="hero">
+      <button class="visual" class:has-photo={v.photo} onclick={pickPhoto} title={v.photo ? "Change the photo of this drive" : "Add a photo of this drive"}>
+        {#if v.photo}
+          <img src={volumePhotoUrl(v.id) + "?t=" + v.last_seen_at} alt="" />
+        {:else}
+          <DriveIcon {kind} />
+        {/if}
+        <span class="visual-hint">{v.photo ? "Change photo" : "Add photo"}</span>
+      </button>
+      <div class="hero-text">
+        <button class="title" onclick={startEdit} title="Edit name, location and notes">
+          <span class="name">{v.label}</span>
+          {#if v.mount_path}<span class="muted mount">{v.mount_path}</span>{:else if v.location}<span class="muted mount">{v.location}</span>{/if}
+        </button>
+        <div class="big">
+          <span class="num">{freeText}</span>
+          <span class="muted">
+            {#if v.capacity > 0}free of {bytes(v.capacity)}{:else}catalogued{/if}
+            · {count(v.file_count)} files
+          </span>
+        </div>
+      </div>
     </div>
     <div class="bar"><div style="width: {usedPct}%"></div></div>
     {#if profile || v.health !== "unknown"}
@@ -292,7 +308,7 @@
         <button class="btn small ghost" aria-label="More" onclick={() => (menu = !menu)}>···</button>
         {#if menu}
           <div class="menu" role="menu">
-            <button role="menuitem" onclick={async () => { menu = false; await ops.setVolumePhoto(v.id); await store.refresh(); }}>{v.photo ? "Change photo…" : "Add a photo of the drive…"}</button>
+            <button role="menuitem" onclick={pickPhoto}>{v.photo ? "Change photo…" : "Add a photo of the drive…"}</button>
             {#if v.photo}
               <button role="menuitem" onclick={async () => { menu = false; await ops.clearVolumePhoto(v.id); await store.refresh(); }}>Remove photo</button>
             {/if}
@@ -372,11 +388,69 @@
   .dot.live {
     background: var(--teal);
   }
-  .photo {
+  .hero {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    min-width: 0;
+  }
+  /* A square that shows the drive's photo, or a drawing of its type. */
+  .visual {
+    all: unset;
+    cursor: pointer;
+    position: relative;
+    flex: none;
+    width: clamp(84px, 32%, 136px);
+    aspect-ratio: 1;
+    border-radius: 12px;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    color: var(--c);
+    background: color-mix(in srgb, var(--c) 9%, transparent);
+    border: 1px solid color-mix(in srgb, var(--c) 18%, transparent);
+    box-sizing: border-box;
+  }
+  .visual.has-photo {
+    border-color: var(--line);
+  }
+  .visual :global(svg) {
+    width: 58%;
+    height: 58%;
+  }
+  .visual img {
+    position: absolute;
+    inset: 0;
     width: 100%;
-    height: 110px;
+    height: 100%;
     object-fit: cover;
-    border-radius: 10px;
+  }
+  .visual-hint {
+    position: absolute;
+    inset: auto 0 0 0;
+    padding: 5px 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-align: center;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.55);
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .visual:hover .visual-hint,
+  .visual:focus-visible .visual-hint {
+    opacity: 1;
+  }
+  .visual:focus-visible {
+    outline: 2px solid var(--accent-line);
+    outline-offset: 2px;
+  }
+  .hero-text {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+    flex: 1;
   }
   .title {
     all: unset;
@@ -408,7 +482,7 @@
   .big {
     display: flex;
     align-items: baseline;
-    gap: 8px;
+    gap: 4px 8px;
     flex-wrap: wrap;
   }
   .num {

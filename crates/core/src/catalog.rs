@@ -2141,6 +2141,11 @@ mod tests {
 
         let cov = cat.enrich_coverage(v.id).unwrap();
         assert_eq!(cov.done, cov.files);
+        let vdb = crate::db::volume::VolumeDb::open(&cat.dirs.volume_db(v.id)).unwrap();
+        assert!(
+            vdb.disk_positions().unwrap().is_empty(),
+            "positions are forgotten once everything is read"
+        );
         let r = cat.search("zebra", &SearchOptions::default()).unwrap();
         assert_eq!(r.total, 1);
         assert_eq!(

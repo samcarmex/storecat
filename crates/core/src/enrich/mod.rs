@@ -363,6 +363,13 @@ impl Catalog {
             if spinning { "spinning" } else { "solid-state" }
         );
 
+        // Disk positions found by earlier runs: resuming needn't look them all up again.
+        let mut known = if spinning {
+            writer.disk_positions().unwrap_or_default()
+        } else {
+            Default::default()
+        };
+        let mut finished = true;
         for pass in [1u8, 2] {
             let (mut jobs, settled) = plan::build(&writer, pass, opts, ffmpeg.is_some(), &bulk)?;
             run.settle(&settled)?;
@@ -379,13 +386,20 @@ impl Catalog {
                         .map(|f| join_abs(root, &f.path, &f.name))
                 };
                 let mut tick = |i: usize| run.emit(0, i as u64, total, "");
+                let mut found = Vec::new();
                 plan::order_for_hdd(
                     &mut jobs,
+                    &known,
+                    &mut found,
                     &mut path_of,
                     &|| cancel.load(Ordering::Relaxed),
                     &mut tick,
                     Duration::from_millis(4),
                 );
+                if let Err(e) = writer.save_disk_positions(&found) {
+                    log::warn!("volume {id}: could not remember disk positions: {e}");
+                }
+                known.extend(found);
             } else {
                 plan::order_for_ssd(&mut jobs, pass);
             }
@@ -398,8 +412,13 @@ impl Catalog {
             }
             if paused || cancel.load(Ordering::Relaxed) {
                 run.stats.paused = true;
+                finished = false;
                 break;
             }
+        }
+        if finished && spinning {
+            // Everything is read: the positions would only go stale.
+            let _ = writer.clear_disk_positions();
         }
         run.stats.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(run.stats)

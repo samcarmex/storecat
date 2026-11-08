@@ -10,6 +10,9 @@ The feature-complete build for 1.0, for testing on real drive collections.
   Catalogued folders inherit their drive's profile. USB enclosures that don't say whether
   their disk spins are recognised from Windows' own disk list or the model name ("Seagate
   Expansion HDD"), so they get the hard-drive reading order.
+- Each drive card shows its photo in a square tile beside the name, or, without one, a
+  drawing of its type: internal or USB hard drive, SATA, pocket or M.2 SSD, USB stick,
+  SD card, disc, NAS, cloud or folder. Click the tile to add or change the photo.
 - Storage view with a treemap per drive, coloured by content type, with drill-down, and a
   content-type breakdown.
 - Suggestions inbox: rescue copies for failing drives, nearly-full drives, the Desktop +
@@ -40,15 +43,20 @@ The feature-complete build for 1.0, for testing on real drive collections.
   slowest file of a batch.
 - Two passes: hashes, details, photo thumbnails and archive contents first (duplicates
   and photo search work early), then document text and video thumbnails.
-- Spinning hard drives and optical discs are read one file at a time in the order the
-  files sit on the disk, while decoding carries on in parallel. Photos there are
-  thumbnailed from the preview the camera embedded, instead of reading the whole photo.
+- Spinning hard drives and optical discs are read in the order the files sit on the
+  disk, while decoding carries on in parallel. Large files are read one at a time; files
+  of 64 KB or less are read up to four at once, so the drive can take them in the order
+  its heads pass them. Photos there are thumbnailed from the preview the camera
+  embedded, instead of reading the whole photo.
+- Where each file sits on a spinning disk is remembered (and carried across rescans), so
+  resuming an enrichment no longer spends minutes working out the read order again.
 - PDFs are read and parsed once for both their details and their text, and text
   extraction stops at the 1 MB limit instead of parsing every page.
 - Package, cache and system folders (`site-packages`, `.venv`, `.cargo`, caches, editor
   extensions, the Android SDK, Deno's cache, coding agents' `.claude/worktrees` copies,
+  WordPress's `wp-admin`, `wp-includes` and plugin folders, `vendor` libraries,
   `Windows`, `Program Files` and similar) keep names and hashes but get no text or
-  thumbnails.
+  thumbnails. WordPress themes and uploads are still read.
 - `.env` files are no longer read for text: they hold passwords and keys.
 - Small `.mts` files are TypeScript, not video, and small `.bin` files are no longer
   counted as disk images.

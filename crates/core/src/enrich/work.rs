@@ -1,7 +1,8 @@
 //! Processing one file: first everything that reads the disk, then everything that only
-//! needs the CPU. On a spinning drive the reading part runs strictly one file at a time,
-//! in the planned order (see [`Turn`]), while decoding carries on in parallel.
+//! needs the CPU. On a spinning drive the reading part takes turns in the planned order
+//! (see [`Turn`]), while decoding carries on in parallel.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
 
@@ -56,44 +57,103 @@ pub(super) struct Outcome {
     pub stages_all: u32,
 }
 
-/// Hands out disk access one file at a time, in `seq` order. Workers pull files in that
-/// order, so whoever holds the next number is never waiting on anything else.
+/// Files this small are read a few at a time on spinning disks: each costs a seek and the
+/// time to open it (antivirus scans included) rather than transfer time, and with several
+/// requests waiting the drive can serve them in the order its heads pass them.
+pub(super) const SMALL_READ: u64 = 64 * 1024;
+/// How many small files may be read at once.
+const SMALL_WINDOW: u64 = 4;
+
+/// Hands out disk access in `seq` order. A large file is read alone; small files may
+/// overlap, up to [`SMALL_WINDOW`] consecutive ones. Workers pull files in `seq` order, so
+/// whoever holds the next number is never waiting on anything else.
 pub(super) struct Turn {
-    next: Mutex<u64>,
+    state: Mutex<TurnState>,
     cv: Condvar,
+}
+
+struct TurnState {
+    /// The next number allowed to start reading.
+    next: u64,
+    /// The lowest number still reading (or not yet started).
+    low: u64,
+    /// Numbers above `low` that already finished.
+    finished: BTreeSet<u64>,
+    /// A large file is being read.
+    large: bool,
 }
 
 impl Turn {
     pub fn new() -> Self {
         Self {
-            next: Mutex::new(0),
+            state: Mutex::new(TurnState {
+                next: 0,
+                low: 0,
+                finished: BTreeSet::new(),
+                large: false,
+            }),
             cv: Condvar::new(),
         }
     }
 
     /// The next turn to be handed out; a new pass numbers its files from here.
     pub fn position(&self) -> u64 {
-        *self.next.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).next
     }
 
-    fn wait(&self, seq: u64) -> TurnGuard<'_> {
-        let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
-        while *next != seq {
-            next = self.cv.wait(next).unwrap_or_else(|e| e.into_inner());
+    fn wait(&self, seq: u64, small: bool) -> TurnGuard<'_> {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            let ready = st.next == seq
+                && !st.large
+                && if small {
+                    seq < st.low + SMALL_WINDOW
+                } else {
+                    seq == st.low
+                };
+            if ready {
+                break;
+            }
+            st = self.cv.wait(st).unwrap_or_else(|e| e.into_inner());
         }
-        TurnGuard { turn: self, seq }
+        st.next = seq + 1;
+        st.large = !small;
+        drop(st);
+        // Others may start alongside a small file.
+        self.cv.notify_all();
+        TurnGuard {
+            turn: self,
+            seq,
+            small,
+        }
     }
 }
 
 pub(super) struct TurnGuard<'a> {
     turn: &'a Turn,
     seq: u64,
+    small: bool,
 }
 
 impl Drop for TurnGuard<'_> {
     fn drop(&mut self) {
-        let mut next = self.turn.next.lock().unwrap_or_else(|e| e.into_inner());
-        *next = self.seq + 1;
+        let mut st = self.turn.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.small {
+            st.large = false;
+        }
+        if self.seq == st.low {
+            st.low += 1;
+            loop {
+                let low = st.low;
+                if !st.finished.remove(&low) {
+                    break;
+                }
+                st.low += 1;
+            }
+        } else {
+            st.finished.insert(self.seq);
+        }
+        drop(st);
         self.turn.cv.notify_all();
     }
 }
@@ -125,7 +185,7 @@ pub(super) fn process(ctx: &Ctx, item: Item) -> Outcome {
 
     // ---- Reading: everything that touches the disk ----
     {
-        let _turn = ctx.turn.map(|t| t.wait(item.seq));
+        let _turn = ctx.turn.map(|t| t.wait(item.seq, f.size <= SMALL_READ));
         if w & W_HASH != 0 {
             match quick_hash(&path, f.size) {
                 Ok(h) => {
@@ -280,5 +340,73 @@ pub(super) fn failed(file: FileRecord, why: &str) -> Outcome {
         meta_json: None,
         stages_all: 0,
         prior_text: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    /// Small files overlap up to the window; a large file waits for every earlier read
+    /// and nothing starts beside it.
+    #[test]
+    fn small_reads_overlap_large_reads_go_alone() {
+        let turn = Turn::new();
+        let started = AtomicU64::new(0);
+        std::thread::scope(|s| {
+            let g0 = turn.wait(0, true);
+            let g1 = turn.wait(1, true);
+            let g2 = turn.wait(2, true);
+            let g3 = turn.wait(3, true);
+            let t = &turn;
+            let st = &started;
+            let small4 = s.spawn(move || {
+                let g = t.wait(4, true);
+                st.store(4, Ordering::SeqCst);
+                g
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(started.load(Ordering::SeqCst), 0, "fifth small read waits");
+            drop(g1); // finishing out of order doesn't open the window
+            std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(started.load(Ordering::SeqCst), 0);
+            drop(g0);
+            let g4 = small4.join().unwrap();
+            assert_eq!(started.load(Ordering::SeqCst), 4);
+
+            let large5 = s.spawn(move || {
+                let g = t.wait(5, false);
+                st.store(5, Ordering::SeqCst);
+                g
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                started.load(Ordering::SeqCst),
+                4,
+                "large read waits for 2, 3, 4"
+            );
+            drop(g2);
+            drop(g3);
+            drop(g4);
+            let g5 = large5.join().unwrap();
+            assert_eq!(started.load(Ordering::SeqCst), 5);
+
+            let small6 = s.spawn(move || {
+                let g = t.wait(6, true);
+                st.store(6, Ordering::SeqCst);
+                g
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                started.load(Ordering::SeqCst),
+                5,
+                "nothing starts beside a large read"
+            );
+            drop(g5);
+            drop(small6.join().unwrap());
+        });
+        assert_eq!(turn.position(), 7);
     }
 }
