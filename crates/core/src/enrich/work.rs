@@ -2,9 +2,10 @@
 //! needs the CPU. On a spinning drive the reading part takes turns in the planned order
 //! (see [`Turn`]), while decoding carries on in parallel.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::catalog::join_abs;
 use crate::db::volume::{
@@ -55,6 +56,21 @@ pub(super) struct Outcome {
     pub prior_text: Option<String>,
     /// Everything recorded for the file once this outcome is written.
     pub stages_all: u32,
+    /// How long the reading half took.
+    pub read_ms: u64,
+    /// A read failed the way a damaged disk fails (CRC / device error), not "not found".
+    pub io_fault: bool,
+}
+
+/// Whether a read error means the disk itself couldn't deliver the data.
+fn is_media_error(e: &std::io::Error) -> bool {
+    let code = e.raw_os_error();
+    if cfg!(windows) {
+        // ERROR_CRC, ERROR_DEVICE_HARDWARE_ERROR, ERROR_IO_DEVICE
+        matches!(code, Some(23 | 483 | 1117))
+    } else {
+        code == Some(5) // EIO
+    }
 }
 
 /// Files this small are read a few at a time on spinning disks: each costs a seek and the
@@ -81,6 +97,10 @@ struct TurnState {
     finished: BTreeSet<u64>,
     /// A large file is being read.
     large: bool,
+    /// When each read in progress started, and the size of its file.
+    reading: BTreeMap<u64, (Instant, u64)>,
+    /// The run is stopping: nobody waits for a turn any more.
+    aborted: bool,
 }
 
 impl Turn {
@@ -91,6 +111,8 @@ impl Turn {
                 low: 0,
                 finished: BTreeSet::new(),
                 large: false,
+                reading: BTreeMap::new(),
+                aborted: false,
             }),
             cv: Condvar::new(),
         }
@@ -101,9 +123,31 @@ impl Turn {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).next
     }
 
-    fn wait(&self, seq: u64, small: bool) -> TurnGuard<'_> {
+    /// Stop handing out turns: waiting workers give up instead of reading.
+    pub fn abort(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).aborted = true;
+        self.cv.notify_all();
+    }
+
+    /// The longest-running read that has gone on far longer than its file's size explains
+    /// (more than `limit` plus 5 MB/s), and how long it has been running.
+    pub fn hung_read(&self, limit: Duration) -> Option<Duration> {
+        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.reading
+            .values()
+            .filter(|(t, size)| t.elapsed() > limit + Duration::from_millis(size / 5_000))
+            .map(|(t, _)| t.elapsed())
+            .max()
+    }
+
+    /// Wait for `seq`'s turn to read a file of `size` bytes; `None` once the run is stopping.
+    fn wait(&self, seq: u64, size: u64) -> Option<TurnGuard<'_>> {
+        let small = size <= SMALL_READ;
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         loop {
+            if st.aborted {
+                return None;
+            }
             let ready = st.next == seq
                 && !st.large
                 && if small {
@@ -118,14 +162,15 @@ impl Turn {
         }
         st.next = seq + 1;
         st.large = !small;
+        st.reading.insert(seq, (Instant::now(), size));
         drop(st);
         // Others may start alongside a small file.
         self.cv.notify_all();
-        TurnGuard {
+        Some(TurnGuard {
             turn: self,
             seq,
             small,
-        }
+        })
     }
 }
 
@@ -138,6 +183,7 @@ pub(super) struct TurnGuard<'a> {
 impl Drop for TurnGuard<'_> {
     fn drop(&mut self) {
         let mut st = self.turn.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.reading.remove(&self.seq);
         if !self.small {
             st.large = false;
         }
@@ -182,17 +228,28 @@ pub(super) fn process(ctx: &Ctx, item: Item) -> Outcome {
     };
     let mut meta: Option<storecat_extract::FileMeta> = None;
     let mut read = Read::default();
+    let mut io_fault = false;
+    let read_started = Instant::now();
 
     // ---- Reading: everything that touches the disk ----
     {
-        let _turn = ctx.turn.map(|t| t.wait(item.seq, f.size <= SMALL_READ));
+        let _turn = match ctx.turn {
+            Some(t) => match t.wait(item.seq, f.size) {
+                Some(g) => Some(g),
+                None => return failed(item.file, "stopped before it was read"),
+            },
+            None => None,
+        };
         if w & W_HASH != 0 {
             match quick_hash(&path, f.size) {
                 Ok(h) => {
                     row.quick_hash = Some(h);
                     row.stages |= STAGE_HASH;
                 }
-                Err(e) => row.error = Some(format!("hash: {e}")),
+                Err(e) => {
+                    io_fault |= is_media_error(&e);
+                    row.error = Some(format!("hash: {e}"));
+                }
             }
         }
         if w & W_META != 0 {
@@ -200,7 +257,7 @@ pub(super) fn process(ctx: &Ctx, item: Item) -> Outcome {
         }
         if w & W_THUMB != 0 {
             if storecat_extract::thumbs::is_thumbnailable(ext) {
-                read.image = read_image(ctx, &path, ext, f.size, &mut row);
+                read.image = read_image(ctx, &path, ext, f.size, &mut row, &mut io_fault);
             } else {
                 read.art = storecat_extract::embedded_art(&path, ext);
             }
@@ -217,7 +274,13 @@ pub(super) fn process(ctx: &Ctx, item: Item) -> Outcome {
         }
         if w & (W_PDF_META | W_TEXT) != 0 && ext == "pdf" {
             if f.size <= storecat_extract::pdf::PDF_MAX_BYTES {
-                read.pdf = std::fs::read(&path).ok();
+                read.pdf = match std::fs::read(&path) {
+                    Ok(b) => Some(b),
+                    Err(e) => {
+                        io_fault |= is_media_error(&e);
+                        None
+                    }
+                };
             }
         } else if w & W_TEXT != 0 {
             // Other formats read only what they need (a zip's directory, a text prefix)
@@ -228,6 +291,7 @@ pub(super) fn process(ctx: &Ctx, item: Item) -> Outcome {
             }
         }
     }
+    let read_ms = read_started.elapsed().as_millis() as u64;
 
     // ---- Decoding: CPU only (or FFmpeg, which reads a little on its own) ----
     if let Some(bytes) = read.image {
@@ -265,16 +329,28 @@ pub(super) fn process(ctx: &Ctx, item: Item) -> Outcome {
     let later = item.work & DETAIL;
     let needs_detail =
         item.pass == 1 && (later & !W_PROBE != 0 || (later & W_PROBE != 0 && meta.is_none()));
+    // A probe that ran out of time means FFmpeg can't get through this file quickly;
+    // asking it for a frame as well would spend that time again.
+    let mut ffmpeg_stuck = false;
     if w & W_PROBE != 0 {
         if let Some(ff) = ctx.ffmpeg {
-            meta = storecat_extract::ffmpeg::probe(&ff.ffprobe, &path);
+            match storecat_extract::ffmpeg::probe(&ff.ffprobe, &path) {
+                Ok(m) => meta = Some(m),
+                Err(e) => {
+                    meta = None;
+                    ffmpeg_stuck = e == storecat_extract::ffmpeg::FfError::TimedOut;
+                    if ffmpeg_stuck {
+                        log::info!("FFmpeg ran out of time reading {}", path.display());
+                    }
+                }
+            }
         }
     }
     if let Some(m) = &meta {
         row.meta_json = serde_json::to_string(m).ok();
         row.stages |= STAGE_META;
     }
-    if w & W_VIDEO_THUMB != 0 {
+    if w & W_VIDEO_THUMB != 0 && !ffmpeg_stuck {
         let known = meta.clone().or_else(|| {
             item.prior_meta
                 .as_deref()
@@ -301,6 +377,8 @@ pub(super) fn process(ctx: &Ctx, item: Item) -> Outcome {
         meta_json,
         stages_all,
         prior_text: item.prior_text,
+        read_ms,
+        io_fault,
     }
 }
 
@@ -311,6 +389,7 @@ fn read_image(
     ext: &str,
     size: u64,
     row: &mut EnrichRow,
+    io_fault: &mut bool,
 ) -> Option<Vec<u8>> {
     let raw = storecat_extract::thumbs::is_raw(ext);
     // Spinning disks, RAW files and huge images: the camera's preview, if it left one.
@@ -324,7 +403,13 @@ fn read_image(
             return None;
         }
     }
-    std::fs::read(path).ok()
+    match std::fs::read(path) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            *io_fault |= is_media_error(&e);
+            None
+        }
+    }
 }
 
 /// What a worker reports when processing a file panicked outside the guarded parsers.
@@ -340,6 +425,8 @@ pub(super) fn failed(file: FileRecord, why: &str) -> Outcome {
         meta_json: None,
         stages_all: 0,
         prior_text: None,
+        read_ms: 0,
+        io_fault: false,
     }
 }
 
@@ -356,14 +443,14 @@ mod tests {
         let turn = Turn::new();
         let started = AtomicU64::new(0);
         std::thread::scope(|s| {
-            let g0 = turn.wait(0, true);
-            let g1 = turn.wait(1, true);
-            let g2 = turn.wait(2, true);
-            let g3 = turn.wait(3, true);
+            let g0 = turn.wait(0, 10).unwrap();
+            let g1 = turn.wait(1, 10).unwrap();
+            let g2 = turn.wait(2, 10).unwrap();
+            let g3 = turn.wait(3, 10).unwrap();
             let t = &turn;
             let st = &started;
             let small4 = s.spawn(move || {
-                let g = t.wait(4, true);
+                let g = t.wait(4, 10).unwrap();
                 st.store(4, Ordering::SeqCst);
                 g
             });
@@ -377,7 +464,7 @@ mod tests {
             assert_eq!(started.load(Ordering::SeqCst), 4);
 
             let large5 = s.spawn(move || {
-                let g = t.wait(5, false);
+                let g = t.wait(5, 10_000_000).unwrap();
                 st.store(5, Ordering::SeqCst);
                 g
             });
@@ -394,7 +481,7 @@ mod tests {
             assert_eq!(started.load(Ordering::SeqCst), 5);
 
             let small6 = s.spawn(move || {
-                let g = t.wait(6, true);
+                let g = t.wait(6, 10).unwrap();
                 st.store(6, Ordering::SeqCst);
                 g
             });
@@ -408,5 +495,28 @@ mod tests {
             drop(small6.join().unwrap());
         });
         assert_eq!(turn.position(), 7);
+    }
+
+    /// Stopping releases everyone waiting for a turn without reading, and a read that runs
+    /// far past what its size explains is reported as hung.
+    #[test]
+    fn abort_releases_waiters_and_hung_reads_show() {
+        let turn = Turn::new();
+        let g0 = turn.wait(0, 10).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(turn.hung_read(Duration::from_millis(10)).is_some());
+        assert!(turn.hung_read(Duration::from_secs(60)).is_none());
+        std::thread::scope(|s| {
+            let t = &turn;
+            let waiting = s.spawn(move || t.wait(1, 10_000_000).is_none());
+            std::thread::sleep(Duration::from_millis(30));
+            turn.abort();
+            assert!(
+                waiting.join().unwrap(),
+                "a stopped run hands out no more turns"
+            );
+        });
+        drop(g0);
+        assert!(turn.hung_read(Duration::ZERO).is_none());
     }
 }

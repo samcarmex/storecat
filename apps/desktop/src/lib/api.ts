@@ -46,6 +46,9 @@ export interface Volume {
   model: string;
   health: Health;
   health_at: number | null;
+  /** Read errors Storecat saw on the drive; automatic scans and enrichment leave it alone. */
+  fault: string | null;
+  fault_at: number | null;
   online: boolean;
   mount_path: string | null;
 }
@@ -97,7 +100,8 @@ export type EnrichPhase =
   | { phase: "running" }
   | { phase: "paused" }
   | { phase: "done" }
-  | { phase: "failed"; message: string };
+  | { phase: "failed"; message: string }
+  | { phase: "stopped"; message: string };
 
 export type EnrichProgress = EnrichPhase & {
   volume_id: number;
@@ -602,6 +606,7 @@ export const ops = {
   deleteSavedSearch: (id: number) => invoke<void>("delete_saved_search", { id }),
   setVolumePhoto: (volumeId: number) => invoke<boolean>("set_volume_photo", { volumeId }),
   clearVolumePhoto: (volumeId: number) => invoke<void>("clear_volume_photo", { volumeId }),
+  clearVolumeFault: (volumeId: number) => invoke<void>("clear_volume_fault", { volumeId }),
 
   shellStatus: () =>
     call<ShellStatus>("shell_status", {}, { tray_mode: false, hotkey_enabled: false, hotkey: "Ctrl+Shift+Space", autostart: false }),

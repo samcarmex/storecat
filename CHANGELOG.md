@@ -30,6 +30,24 @@ The feature-complete build for 1.0, for testing on real drive collections.
   longer double-counted in totals.
 
 **Fixes from testing**
+- Failing drives are noticed and left alone. While a drive is scanned or enriched,
+  Storecat watches Windows' disk-error log for it (no administrator rights needed), and
+  enrichment itself watches for files that fail with disk read errors or reads that hang.
+  Unreadable blocks or repeated retries stop enrichment and mark the drive as failing,
+  with the reason, even when its USB enclosure reports healthy S.M.A.R.T. status. A
+  failing drive isn't scanned or enriched by itself again; its card offers "Resume
+  anyway" and "Clear warning", and a rescue copy is suggested as urgent.
+- Pausing enrichment takes effect right away, even while a read is hanging on a damaged
+  disk, and no further files are read once a run stops. While the files already being
+  read finish, the drive card says "Pausing…" instead of looking as if the click was
+  missed.
+- Flash videos (`.flv`) recorded by Telestream Wirecast and similar tools, which store
+  their tag sizes in the wrong byte order, now get their details and thumbnails in a
+  fraction of a second. FFmpeg used to read each one end to end looking for a valid tag,
+  give up after 40 seconds and leave nothing; files skipped that way are looked at again.
+- FFmpeg installed through Chocolatey or Scoop is stopped completely when it runs out of
+  time. Only its launcher used to be stopped, leaving FFmpeg itself reading the drive in
+  the background, and a file that times out once isn't tried a second and third time.
 - A malformed PDF could crash the app during enrichment. Files a parser can't read are
   now skipped and noted in the log.
 - On Windows, catalogues moved out of the program folder to `%LOCALAPPDATA%\io.storecat.app`,

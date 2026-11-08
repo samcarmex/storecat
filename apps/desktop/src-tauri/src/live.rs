@@ -543,7 +543,7 @@ impl Live {
                 continue;
             }
             log::info!("live: rescanning volume {id} in the background");
-            crate::commands::spawn_scan(self.app.clone(), Arc::clone(&self.catalog), id);
+            crate::commands::spawn_scan(self.app.clone(), Arc::clone(&self.catalog), id, false);
         }
     }
 
@@ -572,7 +572,7 @@ impl Live {
         for id in ready {
             self.enrich_wanted.remove(&id);
             self.last_enrich.insert(id, now);
-            crate::commands::spawn_enrich(self.app.clone(), Arc::clone(&self.catalog), id);
+            crate::commands::spawn_enrich(self.app.clone(), Arc::clone(&self.catalog), id, false);
         }
     }
 }

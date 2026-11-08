@@ -1290,6 +1290,13 @@ impl Catalog {
         self.master().set_photo_flag(id, true)
     }
 
+    /// Record read trouble on a drive (or clear it with `None`). Automatic scans and
+    /// enrichment leave a drive with a fault alone until the user says otherwise.
+    pub fn set_volume_fault(&self, id: VolumeId, fault: Option<&str>) -> Result<()> {
+        self.volume(id)?;
+        self.master().set_fault(id, fault)
+    }
+
     pub fn clear_volume_photo(&self, id: VolumeId) -> Result<()> {
         let _ = std::fs::remove_file(self.dirs.volume_photo(id));
         self.master().set_photo_flag(id, false)
@@ -1876,6 +1883,35 @@ mod tests {
         assert_eq!(cov.done, cov.files);
     }
 
+    /// Flash videos FFmpeg couldn't read before are looked at again, and nothing else.
+    #[test]
+    fn unreadable_flash_videos_are_queued_again() {
+        let data = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::write(tree.path().join("show.flv"), vec![7u8; 4096]).unwrap();
+        std::fs::write(tree.path().join("notes.txt"), "plain").unwrap();
+        let cat = Catalog::open(DataDirs::at(data.path())).unwrap();
+        let v = cat.add_folder(tree.path(), Some("Shows")).unwrap();
+        cat.scan(v.id, &two_thread_scan(), &|_| {}).unwrap();
+        let opts = EnrichOptions {
+            threads: 2,
+            ..Default::default()
+        };
+        cat.enrich(v.id, &opts, &|_| {}).unwrap();
+        let cov = cat.enrich_coverage(v.id).unwrap();
+        assert_eq!(cov.done, cov.files);
+        assert_eq!(cat.upgrade_enrichment(v.id).unwrap(), 0);
+
+        VolumeDb::open_rw(&cat.dirs.volume_db(v.id))
+            .unwrap()
+            .set_info("enrich_format", "2")
+            .unwrap();
+        assert_eq!(cat.upgrade_enrichment(v.id).unwrap(), 1, "only the video");
+        let cov = cat.enrich_coverage(v.id).unwrap();
+        assert_eq!(cov.done + 1, cov.files);
+        assert_eq!(cat.upgrade_enrichment(v.id).unwrap(), 0, "once");
+    }
+
     #[test]
     fn enrichment_text_thumbs_dupes_and_carry_over() {
         let data = tempfile::tempdir().unwrap();
@@ -2089,6 +2125,40 @@ mod tests {
 
         assert_eq!(cat.repair_index(v.id).unwrap(), 1);
         assert_eq!(hits("zebra"), 1);
+    }
+
+    #[test]
+    fn read_faults_stick_until_cleared_and_ask_for_a_rescue() {
+        let data = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::write(tree.path().join("a.txt"), "hello").unwrap();
+        let cat = Catalog::open(DataDirs::at(data.path())).unwrap();
+        let v = cat.add_folder(tree.path(), Some("Old disk")).unwrap();
+        cat.scan(v.id, &two_thread_scan(), &|_| {}).unwrap();
+        cat.set_volume_fault(v.id, Some("221 unreadable blocks"))
+            .unwrap();
+        let got = cat.volume(v.id).unwrap();
+        assert_eq!(got.fault.as_deref(), Some("221 unreadable blocks"));
+        assert!(got.fault_at.is_some());
+        let s = cat.suggestions().unwrap();
+        let rescue = s
+            .iter()
+            .find(|s| s.rule == "health")
+            .expect("rescue suggestion");
+        assert_eq!(rescue.severity, crate::suggest::Severity::Urgent);
+        assert!(
+            rescue.body.contains("221 unreadable blocks"),
+            "{}",
+            rescue.body
+        );
+        cat.set_volume_fault(v.id, None).unwrap();
+        let got = cat.volume(v.id).unwrap();
+        assert!(got.fault.is_none() && got.fault_at.is_none());
+        assert!(!cat
+            .suggestions()
+            .unwrap()
+            .iter()
+            .any(|s| s.rule == "health"));
     }
 
     #[test]

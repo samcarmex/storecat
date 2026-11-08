@@ -30,6 +30,7 @@
   const cov = $derived(store.coverage[v.id]);
   const scanning = $derived(store.isScanning(v.id));
   const enriching = $derived(store.isEnriching(v.id));
+  const pausing = $derived(enriching && !!store.pausing[v.id]);
   const color = $derived(MEDIA_COLOR[v.media_type]);
   /**
    * Free space is held at its value from when a scan or enrichment started until it ends.
@@ -185,14 +186,25 @@
       </div>
     </div>
     <div class="bar"><div style="width: {usedPct}%"></div></div>
-    {#if profile || v.health !== "unknown"}
+    {#if profile || v.health !== "unknown" || v.fault}
       <div class="profile muted">
         {#if profile}<span class="model" title={profile}>{profile}</span>{/if}
-        {#if v.health !== "unknown"}
+        {#if v.fault}
+          <span class="health" style="--h: var(--danger)" title="Read errors Storecat saw: {v.fault}">Failing</span>
+        {:else if v.health !== "unknown"}
           <span class="health" style="--h: {HEALTH_COLOR[v.health]}" title="S.M.A.R.T. status reported by the operating system{v.health_at ? `, checked ${ago(v.health_at)}` : ''}">
             {HEALTH_LABEL[v.health]}
           </span>
         {/if}
+      </div>
+    {/if}
+    {#if v.fault}
+      <div class="fault" role="alert">
+        <span class="fault-tag">Read errors{v.fault_at ? ` · ${ago(v.fault_at)}` : ""}</span>
+        <span>{v.fault}. Storecat stopped reading this drive and won't scan or enrich it by itself. Copy what matters off it first.</span>
+        <div class="fault-row">
+          <button class="btn small" onclick={async () => { await ops.clearVolumeFault(v.id); await store.refresh(); }} title="For when the cause is fixed, such as a loose cable">Clear warning</button>
+        </div>
       </div>
     {/if}
     {#if insideOf}
@@ -236,16 +248,20 @@
       {/if}
     </div>
   {:else if enrich && (enriching || enrich.phase !== "running")}
-    <div class="activity" class:failed={enrich.phase === "failed"}>
+    <div class="activity" class:failed={enrich.phase === "failed" || enrich.phase === "stopped"}>
       {#if enrich.phase === "queued"}
         <div class="line">
           <span class="clock" aria-hidden="true"></span>
           <span>Queued · {queuedBehind ? `starts after ${queuedBehind}` : "starts when the drive before it finishes"}</span>
         </div>
       {:else if enrich.phase === "running"}
-        <div class="line" title={STEP_TITLE[enrich.pass] ?? ""}>
+        <div class="line" title={pausing ? "Files already being read are finished and saved, so nothing is read twice" : STEP_TITLE[enrich.pass] ?? ""}>
           <span class="spin"></span>
-          <span class="step">{STEP_LABEL[enrich.pass] ?? "Enriching"}{#if enrich.pass > 0}<span class="muted">{` · step ${enrich.pass} of 2`}</span>{/if}</span>
+          {#if pausing}
+            <span class="step">Pausing…<span class="muted">{" · finishing current files"}</span></span>
+          {:else}
+            <span class="step">{STEP_LABEL[enrich.pass] ?? "Enriching"}{#if enrich.pass > 0}<span class="muted">{` · step ${enrich.pass} of 2`}</span>{/if}</span>
+          {/if}
           {#if enrich.total > 0}<span class="pct">{Math.floor(enrichPct)}%</span>{/if}
         </div>
         <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.floor(enrichPct)}>
@@ -263,6 +279,8 @@
         <div class="line">Enrichment paused · {v.online ? "picks up where it left off next time" : "resumes when the drive is connected"}</div>
       {:else if enrich.phase === "failed"}
         <div class="line">Enrichment failed: {enrich.message}</div>
+      {:else if enrich.phase === "stopped"}
+        <div class="line">Stopped reading: {enrich.message}</div>
       {/if}
     </div>
   {:else if neverEnriched && v.online && !scanning}
@@ -294,10 +312,17 @@
       {v.last_scan_at ? "Rescan" : "Scan"}
     </button>
     {#if enriching}
-      <button class="btn small ghost" onclick={() => store.cancelEnrich(v.id)}>{enrich?.phase === "queued" ? "Cancel" : "Pause"}</button>
+      <button class="btn small ghost" disabled={pausing} onclick={() => store.cancelEnrich(v.id)}>
+        {enrich?.phase === "queued" ? "Cancel" : pausing ? "Pausing…" : "Pause"}
+      </button>
     {:else if v.online && v.last_scan_at && pending > 0 && !scanning}
-      <button class="btn small" class:primary={neverEnriched} onclick={() => store.startEnrich(v.id)} title="Hashes, details, thumbnails and document text">
-        {neverEnriched ? `Enrich ${count(pending)} files` : `Resume enriching (${count(pending)} left)`}
+      <button
+        class="btn small"
+        class:primary={neverEnriched && !v.fault}
+        onclick={() => store.startEnrich(v.id)}
+        title={v.fault ? "Reads the drive again despite its errors; stops again if new ones appear" : "Hashes, details, thumbnails and document text"}
+      >
+        {v.fault ? "Resume anyway" : neverEnriched ? `Enrich ${count(pending)} files` : `Resume enriching (${count(pending)} left)`}
       </button>
     {/if}
     <span class="grow"></span>
@@ -708,5 +733,27 @@
   .overlap {
     font-size: 12px;
     color: var(--amber);
+  }
+  .fault {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+  }
+  .fault-tag {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--danger);
+  }
+  .fault-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 2px;
   }
 </style>

@@ -832,6 +832,20 @@ impl VolumeDb {
         if format >= ENRICH_FORMAT {
             return Ok(0);
         }
+        let mut queued = 0;
+        if format < 3 {
+            // FFmpeg read nothing from Flash videos whose tag sizes were stored backwards
+            // (it now ignores them): look at those again.
+            queued += self.conn.execute(
+                "UPDATE enrich SET done = ?1 WHERE done = 1 AND (stages & ?2) = 0
+                 AND file_id IN (SELECT id FROM files WHERE ext = 'flv')",
+                params![ENRICH_DETAIL_PENDING as i64, STAGE_THUMB as i64],
+            )?;
+        }
+        if format >= 2 {
+            self.set_info(ENRICH_FORMAT_KEY, &ENRICH_FORMAT.to_string())?;
+            return Ok(queued);
+        }
         let exts: Vec<String> = {
             let mut stmt = self.conn.prepare(
                 "SELECT DISTINCT f.ext FROM files f JOIN enrich e ON e.file_id = f.id
@@ -844,7 +858,6 @@ impl VolumeDb {
                 .filter(|e| storecat_extract::covers::has_embedded_art(e))
                 .collect()
         };
-        let mut queued = 0;
         for ext in &exts {
             queued += self.conn.execute(
                 "UPDATE enrich SET done = ?1 WHERE done = 1 AND (stages & ?2) = 0
@@ -972,7 +985,7 @@ pub const ENRICH_DETAIL_PENDING: u8 = 2;
 pub const ENRICH_ART_PENDING: u8 = 3;
 /// What enrichment produces. Catalogues enriched by an older format get the new parts
 /// filled in (see `Catalog::upgrade_enrichment`).
-pub const ENRICH_FORMAT: u32 = 2;
+pub const ENRICH_FORMAT: u32 = 3;
 const ENRICH_FORMAT_KEY: &str = "enrich_format";
 
 // Stage bits recorded in `enrich.stages`.

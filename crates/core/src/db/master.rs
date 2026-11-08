@@ -12,7 +12,7 @@ use crate::model::{
     VolumeSource,
 };
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 pub struct MasterDb {
     conn: Connection,
@@ -171,6 +171,12 @@ impl MasterDb {
                      state TEXT NOT NULL,
                      until INTEGER
                  );",
+            )?;
+        }
+        if version < 4 {
+            self.conn.execute_batch(
+                "ALTER TABLE volumes ADD COLUMN fault TEXT;
+                 ALTER TABLE volumes ADD COLUMN fault_at INTEGER;",
             )?;
         }
         if version < SCHEMA_VERSION {
@@ -465,6 +471,8 @@ fn row_to_volume(r: &Row) -> rusqlite::Result<Volume> {
         model: r.get("model").unwrap_or_default(),
         health: Health::parse(&r.get::<_, String>("health").unwrap_or_default()),
         health_at: r.get("health_at").unwrap_or(None),
+        fault: r.get("fault").unwrap_or(None),
+        fault_at: r.get("fault_at").unwrap_or(None),
         online: false,
         mount_path: None,
     })
@@ -477,6 +485,16 @@ use crate::model::{
 };
 
 impl MasterDb {
+    /// Record (or with `None`, clear) read trouble Storecat saw on a drive.
+    pub fn set_fault(&self, id: VolumeId, fault: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE volumes SET fault = ?2, fault_at = CASE WHEN ?2 IS NULL THEN NULL ELSE ?3 END
+             WHERE id = ?1",
+            params![id, fault, now_unix()],
+        )?;
+        Ok(())
+    }
+
     pub fn set_photo_flag(&self, id: VolumeId, has: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE volumes SET photo = ?2 WHERE id = ?1",

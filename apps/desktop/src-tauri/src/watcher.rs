@@ -89,14 +89,14 @@ fn maybe_rescan(app: &AppHandle, catalog: &Arc<Catalog>, identity: &str) {
     let rescan = cut_off || (stale && catalog.setting_enabled(settings::AUTO_RESCAN, true));
     if rescan && !catalog.is_scanning(v.id) {
         log::info!("volume \"{}\" reconnected, rescanning", v.label);
-        crate::commands::spawn_scan(app.clone(), Arc::clone(catalog), v.id);
+        crate::commands::spawn_scan(app.clone(), Arc::clone(catalog), v.id, false);
     } else if catalog.setting_enabled(settings::AUTO_ENRICH, true) {
         if let Err(e) = catalog.upgrade_enrichment(v.id) {
             log::warn!("could not check \"{}\" for skipped artwork: {e}", v.label);
         }
         if let Ok(c) = catalog.enrich_coverage(v.id) {
             if c.done < c.files {
-                crate::commands::spawn_enrich(app.clone(), Arc::clone(catalog), v.id);
+                crate::commands::spawn_enrich(app.clone(), Arc::clone(catalog), v.id, false);
             }
         }
     }
@@ -113,7 +113,7 @@ fn resume_interrupted(app: &AppHandle, catalog: &Arc<Catalog>) {
     for v in volumes.into_iter().filter(|v| v.online) {
         if catalog.scan_interrupted(v.id) {
             log::info!("restarting the interrupted scan of \"{}\"", v.label);
-            crate::commands::spawn_scan(app.clone(), Arc::clone(catalog), v.id);
+            crate::commands::spawn_scan(app.clone(), Arc::clone(catalog), v.id, false);
             continue;
         }
         if !auto_enrich || v.last_scan_at.is_none() {
@@ -135,7 +135,7 @@ fn resume_interrupted(app: &AppHandle, catalog: &Arc<Catalog>) {
                     c.done,
                     c.files
                 );
-                crate::commands::spawn_enrich(app.clone(), Arc::clone(catalog), v.id);
+                crate::commands::spawn_enrich(app.clone(), Arc::clone(catalog), v.id, false);
             }
         }
     }

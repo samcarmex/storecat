@@ -110,12 +110,94 @@ pub async fn pick_and_add_folder(app: AppHandle) -> CmdResult<Option<Volume>> {
 
 #[tauri::command]
 pub fn start_scan(app: AppHandle, state: State<AppState>, volume_id: i64) -> CmdResult<()> {
-    spawn_scan(app, Arc::clone(&state.catalog), volume_id);
+    spawn_scan(app, Arc::clone(&state.catalog), volume_id, true);
     Ok(())
 }
 
-pub fn spawn_scan(app: AppHandle, catalog: Arc<Catalog>, volume_id: i64) {
+/// Whether an automatic scan or enrichment should leave this drive alone: it failed to
+/// read before, and every pass over it strains it further. The user can still start one.
+fn held_for_fault(catalog: &Catalog, volume_id: i64, what: &str) -> bool {
+    match catalog.volume(volume_id) {
+        Ok(v) if v.fault.is_some() => {
+            log::info!(
+                "not starting {what} of \"{}\" by itself: it had read errors ({})",
+                v.label,
+                v.fault.unwrap_or_default()
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+/// While a drive is being read, watch the OS's disk-error log for it. Unreadable blocks
+/// or repeated retries mark the drive as failing and, during enrichment, stop it. Dropping
+/// the watch ends it.
+struct DiskWatch(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for DiskWatch {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn watch_disk_errors(
+    app: &AppHandle,
+    catalog: &Arc<Catalog>,
+    volume_id: i64,
+    stop_enrichment: bool,
+) -> Option<DiskWatch> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let v = catalog.volume(volume_id).ok()?;
+    if matches!(
+        v.media_type,
+        storecat_core::MediaType::Network | storecat_core::MediaType::Cloud
+    ) {
+        return None;
+    }
+    let mount = v.mount_path.clone()?;
+    let since = std::time::SystemTime::now();
+    let done = Arc::new(AtomicBool::new(false));
+    let (app, catalog, flag) = (app.clone(), Arc::clone(catalog), Arc::clone(&done));
+    std::thread::Builder::new()
+        .name(format!("storecat-diskwatch-{volume_id}"))
+        .spawn(move || loop {
+            for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if flag.load(Ordering::Relaxed) {
+                    return;
+                }
+            }
+            let Some(e) = storecat_platform::disk_errors(&mount, since) else {
+                return; // no log to read on this system
+            };
+            if !(e.is_failing() || e.is_struggling()) {
+                continue;
+            }
+            let why = format!("Windows logged {}", e.describe());
+            log::warn!("volume {volume_id}: {why}");
+            if let Err(err) = catalog.set_volume_fault(volume_id, Some(&why)) {
+                log::warn!("volume {volume_id}: could not record the fault: {err}");
+            }
+            if stop_enrichment && catalog.is_enriching(volume_id) {
+                catalog.cancel_enrich(volume_id);
+                let _ = app.emit(
+                    "enrich-progress",
+                    EnrichProgress::bare(volume_id, EnrichPhase::Stopped { message: why }),
+                );
+            }
+            let _ = app.emit("volumes-changed", ());
+            return;
+        })
+        .ok()?;
+    Some(DiskWatch(done))
+}
+
+pub fn spawn_scan(app: AppHandle, catalog: Arc<Catalog>, volume_id: i64, by_user: bool) {
     if catalog.is_scanning(volume_id) {
+        return;
+    }
+    if !by_user && held_for_fault(&catalog, volume_id, "a scan") {
         return;
     }
     std::thread::Builder::new()
@@ -125,6 +207,9 @@ pub fn spawn_scan(app: AppHandle, catalog: Arc<Catalog>, volume_id: i64) {
             let progress = move |p: storecat_core::ScanProgress| {
                 let _ = emitter.emit("scan-progress", &p);
             };
+            // A scan only reads folders, and its catalogue is worth having even from a
+            // failing drive: let it finish, but mark the drive.
+            let watch = watch_disk_errors(&app, &catalog, volume_id, false);
             let ok = match catalog.scan(volume_id, &ScanOptions::default(), &progress) {
                 Ok(stats) => {
                     log::info!(
@@ -139,9 +224,10 @@ pub fn spawn_scan(app: AppHandle, catalog: Arc<Catalog>, volume_id: i64) {
                     false
                 }
             };
+            drop(watch);
             let _ = app.emit("volumes-changed", ());
             if ok && catalog.setting_enabled(settings::AUTO_ENRICH, true) {
-                spawn_enrich(app, catalog, volume_id);
+                spawn_enrich(app, catalog, volume_id, false);
             }
         })
         .expect("spawn scan thread");
@@ -157,8 +243,11 @@ fn queue() -> std::sync::MutexGuard<'static, Vec<i64>> {
     ENRICH_QUEUE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-pub fn spawn_enrich(app: AppHandle, catalog: Arc<Catalog>, volume_id: i64) {
+pub fn spawn_enrich(app: AppHandle, catalog: Arc<Catalog>, volume_id: i64, by_user: bool) {
     if catalog.is_enriching(volume_id) {
+        return;
+    }
+    if !by_user && held_for_fault(&catalog, volume_id, "enrichment") {
         return;
     }
     {
@@ -199,7 +288,10 @@ pub fn spawn_enrich(app: AppHandle, catalog: Arc<Catalog>, volume_id: i64) {
                 hash_min_bytes: catalog.hash_min_bytes(),
                 ..Default::default()
             };
-            match catalog.enrich(volume_id, &opts, &progress) {
+            let watch = watch_disk_errors(&app, &catalog, volume_id, true);
+            let result = catalog.enrich(volume_id, &opts, &progress);
+            drop(watch);
+            match result {
                 Ok(s) => log::info!(
                     "enrichment of volume {volume_id} {}: {} files, {} thumbs, {} texts in {} ms",
                     if s.paused { "paused" } else { "done" },
@@ -217,7 +309,18 @@ pub fn spawn_enrich(app: AppHandle, catalog: Arc<Catalog>, volume_id: i64) {
 
 #[tauri::command]
 pub fn start_enrich(app: AppHandle, state: State<AppState>, volume_id: i64) -> CmdResult<()> {
-    spawn_enrich(app, Arc::clone(&state.catalog), volume_id);
+    spawn_enrich(app, Arc::clone(&state.catalog), volume_id, true);
+    Ok(())
+}
+
+/// Forget the read errors recorded for a drive (after replacing a cable, say).
+#[tauri::command]
+pub fn clear_volume_fault(app: AppHandle, state: State<AppState>, volume_id: i64) -> CmdResult<()> {
+    state
+        .catalog
+        .set_volume_fault(volume_id, None)
+        .map_err(err)?;
+    let _ = app.emit("volumes-changed", ());
     Ok(())
 }
 
@@ -589,7 +692,7 @@ pub fn spawn_job(app: AppHandle, catalog: Arc<Catalog>, job_id: i64) {
                         }
                         ids.dedup();
                         for id in ids {
-                            spawn_scan(app.clone(), Arc::clone(&catalog), id);
+                            spawn_scan(app.clone(), Arc::clone(&catalog), id, false);
                         }
                     }
                 }

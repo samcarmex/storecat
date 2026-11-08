@@ -8,7 +8,7 @@ use std::ffi::{c_void, OsStr};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use storecat_core::model::{DetectedVolume, Health, MediaType};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
@@ -354,38 +354,115 @@ struct PhysicalDisk {
     health: Health,
 }
 
-/// `Get-PhysicalDisk` through PowerShell: the OS's own S.M.A.R.T. summary per disk.
-/// Runs hidden, with a timeout, at most once per new drive (results are cached).
-fn physical_disks() -> Vec<PhysicalDisk> {
-    let script = "Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,BusType,MediaType,HealthStatus | ConvertTo-Json -Compress";
-    let Ok(mut child) = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+/// Run a console tool hidden, with a timeout, and return what it printed.
+fn run_hidden(exe: &str, args: &[&str], timeout: Duration) -> Option<Vec<u8>> {
+    let mut child = Command::new(exe)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-    else {
-        return Vec::new();
-    };
+        .ok()?;
+    // Read while it runs: a full pipe would stall the tool until the timeout.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
+        buf
+    });
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if start.elapsed() < Duration::from_secs(15) => {
-                std::thread::sleep(Duration::from_millis(50))
-            }
+            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(50)),
             _ => {
                 let _ = child.kill();
-                log::warn!("Get-PhysicalDisk timed out");
-                return Vec::new();
+                let _ = child.wait();
+                log::warn!("{exe} timed out");
+                return None;
             }
         }
     }
-    let Ok(out) = child.wait_with_output() else {
-        return Vec::new();
-    };
-    parse_physical_disks(&String::from_utf8_lossy(&out.stdout))
+    reader.join().ok()
+}
+
+/// `Get-PhysicalDisk` through PowerShell: the OS's own S.M.A.R.T. summary per disk.
+/// Runs hidden, with a timeout, at most once per new drive (results are cached).
+fn physical_disks() -> Vec<PhysicalDisk> {
+    let script = "Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,BusType,MediaType,HealthStatus | ConvertTo-Json -Compress";
+    run_hidden(
+        "powershell.exe",
+        &["-NoProfile", "-NonInteractive", "-Command", script],
+        Duration::from_secs(15),
+    )
+    .map(|out| parse_physical_disks(&String::from_utf8_lossy(&out)))
+    .unwrap_or_default()
+}
+
+/// The disk number (`\Device\HarddiskN`) a mounted volume lives on.
+fn disk_number(mount: &str) -> Option<u32> {
+    let h = open_volume(mount)?;
+    let mut num = [0u8; 12];
+    ioctl(&h, IOCTL_STORAGE_GET_DEVICE_NUMBER, &[], &mut num)
+        .filter(|&n| n >= 8)
+        .map(|_| u32_at(&num, 4))
+}
+
+/// Read errors Windows logged for the disk behind `mount` since `since`: the System log's
+/// `disk` events for bad blocks (7), retried requests (153), controller errors (11) and
+/// paging errors (51). Readable without administrator rights.
+pub(crate) fn disk_errors(mount: &str, since: SystemTime) -> Option<crate::DiskErrors> {
+    let disk = disk_number(mount)?;
+    let ms = since
+        .elapsed()
+        .unwrap_or_default()
+        .as_millis()
+        .clamp(1_000, 7 * 24 * 3_600_000);
+    let query = format!(
+        "/q:*[System[Provider[@Name='disk'] and (EventID=7 or EventID=11 or EventID=51 or EventID=153) and TimeCreated[timediff(@SystemTime) <= {ms}]]]"
+    );
+    let out = run_hidden(
+        "wevtutil.exe",
+        &["qe", "System", &query, "/f:xml", "/c:500", "/rd:true"],
+        Duration::from_secs(10),
+    )?;
+    Some(parse_disk_events(&String::from_utf8_lossy(&out), disk))
+}
+
+fn parse_disk_events(xml: &str, disk: u32) -> crate::DiskErrors {
+    let mut e = crate::DiskErrors::default();
+    for ev in xml.split("<Event ").skip(1) {
+        let id = ev
+            .split_once("<EventID")
+            .and_then(|(_, r)| r.split_once('>'))
+            .and_then(|(_, r)| r.split_once('<'))
+            .and_then(|(n, _)| n.trim().parse::<u32>().ok());
+        let device = ev
+            .split_once("<Data>")
+            .and_then(|(_, r)| r.split_once("</Data>"))
+            .map(|(d, _)| d)
+            .unwrap_or("");
+        let number = device
+            .to_ascii_lowercase()
+            .split_once("harddisk")
+            .map(|(_, r)| {
+                r.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+            })
+            .and_then(|n| n.parse::<u32>().ok());
+        if number != Some(disk) {
+            continue;
+        }
+        match id {
+            Some(7) => e.bad_blocks += 1,
+            Some(153) => e.retries += 1,
+            Some(11) | Some(51) => e.other += 1,
+            _ => {}
+        }
+    }
+    e
 }
 
 fn parse_physical_disks(json: &str) -> Vec<PhysicalDisk> {
@@ -436,6 +513,22 @@ fn parse_physical_disks(json: &str) -> Vec<PhysicalDisk> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_disk_errors_for_one_disk() {
+        let xml = r"<Event xmlns='x'><System><Provider Name='disk'/><EventID Qualifiers='49156'>7</EventID></System><EventData><Data>\Device\Harddisk1\DR11</Data></EventData></Event><Event xmlns='x'><System><EventID Qualifiers='32772'>153</EventID></System><EventData><Data>\Device\Harddisk1\DR11</Data><Data>0x8828870</Data></EventData></Event><Event xmlns='x'><System><EventID>7</EventID></System><EventData><Data>\Device\Harddisk12\DR3</Data></EventData></Event><Event xmlns='x'><System><EventID>51</EventID></System><EventData><Data>\Device\Harddisk1\DR11</Data></EventData></Event>";
+        let e = parse_disk_events(xml, 1);
+        assert_eq!((e.bad_blocks, e.retries, e.other), (1, 1, 1));
+        assert_eq!(parse_disk_events(xml, 12).bad_blocks, 1);
+        assert_eq!(parse_disk_events(xml, 2), crate::DiskErrors::default());
+    }
+
+    #[test]
+    fn reads_the_system_log_for_the_system_drive() {
+        // Whatever the log holds, asking must work without administrator rights.
+        let since = SystemTime::now() - Duration::from_secs(3600);
+        assert!(disk_errors("C:\\", since).is_some());
+    }
 
     #[test]
     fn parses_single_and_array_output() {

@@ -46,6 +46,58 @@ struct Cached {
     at: Instant,
 }
 
+/// Read errors the operating system logged for a drive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiskErrors {
+    /// Sectors that could not be read at all.
+    pub bad_blocks: u32,
+    /// Requests the disk only answered on a retry.
+    pub retries: u32,
+    /// Controller and paging errors.
+    pub other: u32,
+}
+
+impl DiskErrors {
+    /// Data could not be read: the drive is failing (or its connection is).
+    pub fn is_failing(&self) -> bool {
+        self.bad_blocks > 0 || self.other > 0
+    }
+
+    /// Repeated retries: a struggling drive or a poor cable.
+    pub fn is_struggling(&self) -> bool {
+        self.retries >= 5
+    }
+
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        let n = |c: u32, one: &str, many: &str| format!("{c} {}", if c == 1 { one } else { many });
+        if self.bad_blocks > 0 {
+            parts.push(n(self.bad_blocks, "unreadable block", "unreadable blocks"));
+        }
+        if self.other > 0 {
+            parts.push(n(self.other, "controller error", "controller errors"));
+        }
+        if self.retries > 0 {
+            parts.push(n(self.retries, "retried read", "retried reads"));
+        }
+        parts.join(", ")
+    }
+}
+
+/// Read errors logged for the drive behind `mount` since `since`. `None` where the OS
+/// keeps no such log (or it can't be read); Windows reads its System event log.
+pub fn disk_errors(mount: &str, since: std::time::SystemTime) -> Option<DiskErrors> {
+    #[cfg(windows)]
+    {
+        windows::disk_errors(mount, since)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (mount, since);
+        None
+    }
+}
+
 /// Health is re-read at most this often for a drive that stays connected.
 const PROFILE_TTL: Duration = Duration::from_secs(60 * 60);
 

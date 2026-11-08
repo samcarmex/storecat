@@ -222,6 +222,10 @@ pub struct Volume {
     pub health: Health,
     /// When health was last read (unix seconds).
     pub health_at: Option<i64>,
+    /// Read trouble Storecat saw itself (unreadable blocks, reads that hung), which a USB
+    /// enclosure's "healthy" S.M.A.R.T. summary doesn't clear. Stays until the user clears it.
+    pub fault: Option<String>,
+    pub fault_at: Option<i64>,
     /// Live: connected right now.
     pub online: bool,
     /// Live: where it is mounted right now, if online.
@@ -521,6 +525,10 @@ pub enum EnrichPhase {
     Failed {
         message: String,
     },
+    /// Stopped because the drive failed to read; not resumed automatically.
+    Stopped {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -575,6 +583,8 @@ pub struct EnrichStats {
     pub errors: u64,
     pub elapsed_ms: u64,
     pub paused: bool,
+    /// Why the run stopped itself: the drive failed to read (also stored on the volume).
+    pub fault: Option<String>,
 }
 
 /// A duplicate group being hashed in full ("Verify"), for its progress bar.

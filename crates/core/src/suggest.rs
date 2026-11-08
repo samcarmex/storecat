@@ -226,9 +226,10 @@ impl Catalog {
 
     fn rule_health(&self, vols: &[Volume], out: &mut Vec<Suggestion>) {
         for v in vols.iter().filter(|v| {
-            matches!(v.health, Health::Warning | Health::Unhealthy) && v.total_bytes > 0
+            (matches!(v.health, Health::Warning | Health::Unhealthy) || v.fault.is_some())
+                && v.total_bytes > 0
         }) {
-            let urgent = v.health == Health::Unhealthy;
+            let urgent = v.health == Health::Unhealthy || v.fault.is_some();
             let dest = pick_destination(vols, v.total_bytes, v.id, &[Role::Backup, Role::Archive]);
             let action = match (&dest, v.mount_path.as_ref().or(v.last_mount_path.as_ref())) {
                 (Some(d), Some(src)) => Some(SuggestionAction::Job {
@@ -258,20 +259,34 @@ impl Catalog {
             };
             out.push(Suggestion {
             path: None,
-                key: format!("health:{}:{}", v.id, v.health.as_str()),
+                key: if v.fault.is_some() {
+                    format!("health:{}:fault:{}", v.id, v.fault_at.unwrap_or(0))
+                } else {
+                    format!("health:{}:{}", v.id, v.health.as_str())
+                },
                 rule: "health".into(),
                 severity: if urgent { Severity::Urgent } else { Severity::Warning },
-                title: format!(
-                    "{} reports {} health",
-                    v.label,
-                    if urgent { "failing" } else { "degraded" }
-                ),
-                body: match &dest {
-                    Some(d) => format!(
-                        "Windows flagged this drive's S.M.A.R.T. status. Copy its contents to {} while it still reads reliably.",
-                        d.label
-                    ),
-                    None => "Windows flagged this drive's S.M.A.R.T. status. Give another drive the Backup role with enough free space and Storecat will plan a rescue copy.".into(),
+                title: if v.fault.is_some() {
+                    format!("{} is failing to read", v.label)
+                } else {
+                    format!(
+                        "{} reports {} health",
+                        v.label,
+                        if urgent { "failing" } else { "degraded" }
+                    )
+                },
+                body: {
+                    let why = match &v.fault {
+                        Some(f) => format!("Storecat saw read errors on this drive ({f})."),
+                        None => "Windows flagged this drive's S.M.A.R.T. status.".to_string(),
+                    };
+                    match &dest {
+                        Some(d) => format!(
+                            "{why} Copy its contents to {} while it still reads.",
+                            d.label
+                        ),
+                        None => format!("{why} Give another drive the Backup role with enough free space and Storecat will plan a rescue copy."),
+                    }
                 },
                 bytes: v.total_bytes,
                 volume_id: Some(v.id),
@@ -939,6 +954,8 @@ mod tests {
             model: String::new(),
             health: Health::Unknown,
             health_at: None,
+            fault: None,
+            fault_at: None,
             online: true,
             mount_path: Some(mount.into()),
         }

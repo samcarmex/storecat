@@ -154,6 +154,7 @@ pub fn run() {
             commands::duplicate_summary,
             commands::verify_group,
             commands::verifying,
+            commands::clear_volume_fault,
             commands::ffmpeg_status,
             commands::download_ffmpeg,
             commands::export_volume,

@@ -245,18 +245,29 @@ impl Catalog {
             }
             map.insert(id, Arc::clone(&cancel));
         }
+        let run_started = now_unix();
         let result = self.enrich_inner(id, &volume, &root, opts, &cancel, progress);
         self.enriching
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&id);
+        // Read trouble found during this run, by the run itself or by the OS's error log.
+        let fault = match &result {
+            Ok(s) if s.paused => s.fault.clone().or_else(|| {
+                self.volume(id)
+                    .ok()
+                    .filter(|v| v.fault_at.is_some_and(|at| at >= run_started))
+                    .and_then(|v| v.fault)
+            }),
+            _ => None,
+        };
         match &result {
             Ok(stats) => progress(EnrichProgress {
                 volume_id: id,
-                phase: if stats.paused {
-                    EnrichPhase::Paused
-                } else {
-                    EnrichPhase::Done
+                phase: match fault {
+                    Some(message) => EnrichPhase::Stopped { message },
+                    None if stats.paused => EnrichPhase::Paused,
+                    None => EnrichPhase::Done,
                 },
                 pass: 2,
                 done: stats.processed,
@@ -357,6 +368,10 @@ impl Catalog {
             progress,
             started,
             stats: EnrichStats::default(),
+            // A slow network share is just slow; only local drives are judged by read times.
+            watch_faults: !matches!(volume.media_type, MediaType::Network | MediaType::Cloud),
+            io_faults: 0,
+            slow_reads: 0,
         };
         log::info!(
             "enriching volume {id}: {threads} threads, {} disk",
@@ -613,6 +628,22 @@ struct PassRun<'a> {
     progress: &'a (dyn Fn(EnrichProgress) + Sync),
     started: Instant,
     stats: EnrichStats,
+    watch_faults: bool,
+    /// Files whose reads failed with disk errors this run.
+    io_faults: u32,
+    /// Reads that took far longer than their size explains.
+    slow_reads: u32,
+}
+
+/// Disk read errors (or crawling reads) that stop a run: a drive that fails this often is
+/// failing, and every retry strains it further.
+const FAULTS_TO_STOP: u32 = 3;
+/// A read still going this long after its size explains has hung on damaged sectors.
+const STALLED_READ: Duration = Duration::from_secs(90);
+
+/// Whether reading a file took far longer than its size explains (20 s, plus 5 MB/s).
+fn is_slow_read(read_ms: u64, size: u64) -> bool {
+    read_ms > 20_000 + size / 5_000
 }
 
 type Written = (work::Outcome, Vec<(i64, storecat_extract::ArchiveEntry)>);
@@ -634,6 +665,33 @@ impl PassRun<'_> {
             elapsed_ms: self.started.elapsed().as_millis() as u64,
             current: current.to_string(),
         });
+    }
+
+    /// Stop the run because the drive is failing to read: record why on the volume (so
+    /// nothing resumes it by itself) and tell the UI now, before hung reads return.
+    fn stop_for_fault(&mut self, cat: &Catalog, pass: u8, why: String) {
+        log::warn!("volume {}: stopping enrichment: {why}", self.id);
+        if let Err(e) = cat.set_volume_fault(self.id, Some(&why)) {
+            log::warn!("volume {}: could not record the fault: {e}", self.id);
+        }
+        let s = &self.stats;
+        (self.progress)(EnrichProgress {
+            volume_id: self.id,
+            phase: EnrichPhase::Stopped {
+                message: why.clone(),
+            },
+            pass,
+            done: 0,
+            total: 0,
+            hashed: s.hashed,
+            metas: s.metas,
+            thumbs: s.thumbs,
+            texts: s.texts,
+            archives: s.archives,
+            elapsed_ms: self.started.elapsed().as_millis() as u64,
+            current: String::new(),
+        });
+        self.stats.fault = Some(why);
     }
 
     /// Record files the planner settled without reading them.
@@ -713,6 +771,9 @@ impl PassRun<'_> {
                 let out_tx = out_tx.clone();
                 s.spawn(move || {
                     for item in job_rx.iter() {
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
                         let file = item.file.clone();
                         let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             work::process(ctx, item)
@@ -726,9 +787,15 @@ impl PassRun<'_> {
             }
             drop(job_rx);
             drop(out_tx);
-            let written = self.write_outcomes(cat, pass, total, &out_rx);
+            let written = self.write_outcomes(cat, pass, total, &out_rx, ctx.turn);
             // Stop feeding; workers finish what they hold and find nobody listening.
             stop.store(true, Ordering::Relaxed);
+            if !matches!(written, Ok(false)) {
+                // Stopping early: nobody waits for a read turn, so no further file is read.
+                if let Some(t) = ctx.turn {
+                    t.abort();
+                }
+            }
             drop(out_rx);
             let fed = feeder.join().unwrap_or(Ok(()));
             let paused = written?;
@@ -743,6 +810,7 @@ impl PassRun<'_> {
         pass: u8,
         total: u64,
         outcomes: &crossbeam_channel::Receiver<work::Outcome>,
+        turn: Option<&work::Turn>,
     ) -> Result<bool> {
         let mut pending: Vec<Written> = Vec::with_capacity(self.opts.batch);
         let mut done = 0u64;
@@ -755,10 +823,38 @@ impl PassRun<'_> {
         let mut open = true;
         self.writer.begin()?;
         self.thumbs.begin()?;
-        for out in outcomes.iter() {
+        loop {
+            // Wait in short steps: a pause, or a read hung on a damaged disk, must be
+            // noticed even when no file finishes.
+            let out = match outcomes.recv_timeout(Duration::from_millis(250)) {
+                Ok(out) => out,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    if self.cancel.load(Ordering::Relaxed) {
+                        paused = true;
+                        break;
+                    }
+                    if let Some(age) = turn.and_then(|t| t.hung_read(STALLED_READ)) {
+                        if self.watch_faults {
+                            self.stop_for_fault(
+                                cat,
+                                pass,
+                                format!("a read hung for over {} s", age.as_secs()),
+                            );
+                            paused = true;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            };
             if self.cancel.load(Ordering::Relaxed) {
                 paused = true;
                 break;
+            }
+            if self.watch_faults {
+                self.io_faults += out.io_fault as u32;
+                self.slow_reads += is_slow_read(out.read_ms, out.file.size) as u32;
             }
             let done_value = if out.needs_detail {
                 ENRICH_DETAIL_PENDING
@@ -812,6 +908,16 @@ impl PassRun<'_> {
             if last_emit.elapsed() >= Duration::from_millis(250) {
                 self.emit(pass, done, total, &current);
                 last_emit = Instant::now();
+            }
+            if self.io_faults >= FAULTS_TO_STOP || self.slow_reads >= FAULTS_TO_STOP {
+                let why = if self.io_faults >= FAULTS_TO_STOP {
+                    format!("{} files failed with disk read errors", self.io_faults)
+                } else {
+                    format!("{} reads took far too long", self.slow_reads)
+                };
+                self.stop_for_fault(cat, pass, why);
+                paused = true;
+                break;
             }
         }
         if open {
@@ -877,5 +983,19 @@ impl PassRun<'_> {
             self.stats.archives += (r.stages & STAGE_ARCHIVE != 0) as u64;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_slow_read;
+
+    #[test]
+    fn slow_reads_allow_for_size() {
+        assert!(!is_slow_read(3_000, 1_000));
+        assert!(is_slow_read(25_000, 1_000));
+        // A 500 MB file read at 10 MB/s is slow-ish but explained by its size.
+        assert!(!is_slow_read(50_000, 500_000_000));
+        assert!(is_slow_read(200_000, 500_000_000));
     }
 }

@@ -24,6 +24,8 @@ export class AppStore {
   progress = $state<Record<number, ScanProgress>>({});
   /** volume id → latest enrichment progress while it runs */
   enrich = $state<Record<number, EnrichProgress>>({});
+  /** volume ids whose enrichment was asked to pause and is finishing the files in hand */
+  pausing = $state<Record<number, true>>({});
   /** volume id → enrichment coverage, refreshed with the volume list */
   coverage = $state<Record<number, EnrichCoverage>>({});
   download = $state<DownloadProgress | null>(null);
@@ -161,10 +163,13 @@ export class AppStore {
       }
     } else {
       this.enrich[p.volume_id] = p;
+      delete this.pausing[p.volume_id];
       this.catalogVersion += 1;
+      // Stopped for read errors: the drive now carries a fault to show.
+      if (p.phase === "stopped") void this.refresh();
       setTimeout(() => {
         if (this.enrich[p.volume_id]?.phase === p.phase) delete this.enrich[p.volume_id];
-      }, p.phase === "failed" ? 8000 : 3000);
+      }, p.phase === "failed" || p.phase === "stopped" ? 10000 : 3000);
     }
   }
 
@@ -214,9 +219,13 @@ export class AppStore {
   }
 
   async cancelEnrich(id: number) {
+    // A queued drive drops out at once; a running one finishes the files it is reading
+    // (a slow video can take a while), so say the pause was heard.
+    if (this.enrich[id]?.phase === "running") this.pausing[id] = true;
     try {
       await api.cancelEnrich(id);
     } catch (e) {
+      delete this.pausing[id];
       this.error = String(e);
     }
   }
